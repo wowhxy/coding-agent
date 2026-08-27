@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -223,6 +224,184 @@ def create_read_file_tool(paths: WorkspacePaths) -> RegisteredTool:
     return RegisteredTool(definition, validate, handle)
 
 
+def create_write_file_tool(paths: WorkspacePaths) -> RegisteredTool:
+    """Create an atomic UTF-8 file writer bound to one workspace."""
+
+    definition = ToolDefinition(
+        name="write_file",
+        description="Create or explicitly overwrite a UTF-8 workspace file.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+                "overwrite": {"type": "boolean", "default": False},
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+    )
+
+    def validate(arguments: dict[str, Any]) -> dict[str, Any]:
+        require_keys(
+            arguments,
+            required={"path", "content"},
+            optional={"overwrite"},
+        )
+        requested_path = arguments["path"]
+        content = arguments["content"]
+        overwrite = arguments.get("overwrite", False)
+        if not isinstance(requested_path, str):
+            raise ToolArgumentError("path must be a string")
+        if not isinstance(content, str):
+            raise ToolArgumentError("content must be a string")
+        if not isinstance(overwrite, bool):
+            raise ToolArgumentError("overwrite must be a boolean")
+        return {
+            "path": requested_path,
+            "content": content,
+            "overwrite": overwrite,
+        }
+
+    def handle(call_id: str, arguments: dict[str, Any]) -> ToolResult:
+        try:
+            target = paths.resolve_new_file(arguments["path"])
+        except WorkspacePathError as exc:
+            return _path_failure(call_id, "write_file", exc)
+
+        exists = target.exists()
+        if exists and not target.is_file():
+            return ToolResult(
+                call_id,
+                "write_file",
+                False,
+                "",
+                "NOT_A_FILE",
+                f"path is not a file: {arguments['path']}",
+            )
+        if exists and not arguments["overwrite"]:
+            return ToolResult(
+                call_id,
+                "write_file",
+                False,
+                "",
+                "FILE_ALREADY_EXISTS",
+                f"file already exists; set overwrite=true to replace it: {arguments['path']}",
+            )
+
+        _atomic_write_text(target, arguments["content"])
+        action = "overwrote" if exists else "created"
+        return ToolResult(
+            call_id,
+            "write_file",
+            True,
+            f"{action} file: {paths.display_path(target)}",
+        )
+
+    return RegisteredTool(definition, validate, handle)
+
+
+def create_replace_in_file_tool(paths: WorkspacePaths) -> RegisteredTool:
+    """Create an exact single-occurrence replacement tool."""
+
+    definition = ToolDefinition(
+        name="replace_in_file",
+        description="Replace exactly one literal text occurrence in a workspace file.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "old_text": {"type": "string"},
+                "new_text": {"type": "string"},
+            },
+            "required": ["path", "old_text", "new_text"],
+            "additionalProperties": False,
+        },
+    )
+
+    def validate(arguments: dict[str, Any]) -> dict[str, Any]:
+        require_keys(
+            arguments,
+            required={"path", "old_text", "new_text"},
+            optional=(),
+        )
+        requested_path = arguments["path"]
+        old_text = arguments["old_text"]
+        new_text = arguments["new_text"]
+        if not isinstance(requested_path, str):
+            raise ToolArgumentError("path must be a string")
+        if not isinstance(old_text, str):
+            raise ToolArgumentError("old_text must be a string")
+        if not isinstance(new_text, str):
+            raise ToolArgumentError("new_text must be a string")
+        if old_text == "":
+            raise ToolArgumentError("old_text must not be empty")
+        return {
+            "path": requested_path,
+            "old_text": old_text,
+            "new_text": new_text,
+        }
+
+    def handle(call_id: str, arguments: dict[str, Any]) -> ToolResult:
+        try:
+            target = paths.resolve_existing(arguments["path"])
+        except WorkspacePathError as exc:
+            return _path_failure(call_id, "replace_in_file", exc)
+        if not target.is_file():
+            return ToolResult(
+                call_id,
+                "replace_in_file",
+                False,
+                "",
+                "NOT_A_FILE",
+                f"path is not a file: {arguments['path']}",
+            )
+
+        try:
+            content = target.read_bytes().decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return _decode_failure(
+                call_id,
+                "replace_in_file",
+                arguments["path"],
+            )
+
+        occurrence_count = content.count(arguments["old_text"])
+        if occurrence_count == 0:
+            return ToolResult(
+                call_id,
+                "replace_in_file",
+                False,
+                "",
+                "EDIT_TARGET_NOT_FOUND",
+                "old_text was not found in the target file",
+            )
+        if occurrence_count > 1:
+            return ToolResult(
+                call_id,
+                "replace_in_file",
+                False,
+                "",
+                "EDIT_TARGET_AMBIGUOUS",
+                f"old_text occurs {occurrence_count} times; expected exactly one",
+            )
+
+        replacement = content.replace(
+            arguments["old_text"],
+            arguments["new_text"],
+            1,
+        )
+        _atomic_write_text(target, replacement)
+        return ToolResult(
+            call_id,
+            "replace_in_file",
+            True,
+            f"replaced 1 occurrence in: {paths.display_path(target)}",
+        )
+
+    return RegisteredTool(definition, validate, handle)
+
+
 def _list_entries(paths: WorkspacePaths, target: Path) -> list[str]:
     entries: list[tuple[str, bool]] = []
     for current, dirnames, filenames in os.walk(target, followlinks=False):
@@ -297,6 +476,34 @@ def _matches_in_text(display: str, text: str, query: str) -> list[SearchMatch]:
 def _render_match(match: SearchMatch) -> str:
     path, line_number, line = match
     return f"{path}:{line_number}:{line}"
+
+
+def _atomic_write_text(target: Path, content: str) -> None:
+    """Durably write UTF-8 text and atomically replace the target path."""
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(content)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, target)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _is_line_number(value: object) -> bool:
