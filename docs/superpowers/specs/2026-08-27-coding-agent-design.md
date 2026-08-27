@@ -1,7 +1,7 @@
 # Coding Agent Design Spec
 
 日期：2026-08-27  
-状态：待用户最终确认  
+状态：正式批准  
 需求最高优先级来源：`推免考核题目学生版.pdf`
 
 ## 1. 项目目标
@@ -165,6 +165,7 @@ ToolResult
   ok: bool
   output: str
   error_code: str | None
+  error_message: str | None
 
 ModelTurn
   final_text: str | None
@@ -178,6 +179,8 @@ RunResult
 ```
 
 Provider 的原始响应必须先转换为 `ModelTurn`，AgentRunner 不读取厂商原始 JSON。Tool handler 的异常必须转换为 `ToolResult`，模型看不到 Python traceback。
+
+`ToolResult` 的三个结果字段职责明确分离：`output` 保存工具正常输出，或失败时仍有诊断价值的输出，例如 stdout/stderr；`error_code` 保存机器可识别、可测试的错误类型；`error_message` 保存供模型和用户理解失败原因并采取恢复行动的简洁说明。成功结果必须使用 `ok=true`、`error_code=None`、`error_message=None`；失败结果必须使用 `ok=false` 且同时提供非空 `error_code` 和 `error_message`，`output` 可以为空。
 
 ## 6. Model Provider
 
@@ -401,7 +404,7 @@ MVP 不加入第二模型裁判、自动 completion verifier 或强制“必须�
 
 ### 11.1 Tool-call 与本地工具错误
 
-以下错误转换为 `ToolResult(ok=false)` 并反馈模型，使模型有机会恢复：
+以下错误转换为 `ToolResult(ok=false)` 并反馈模型，使模型有机会恢复。每个失败结果都包含稳定的 `error_code` 和简洁的 `error_message`；如果执行过程还产生了有价值的信息，则保留在 `output`：
 
 - `UNKNOWN_TOOL`
 - `MALFORMED_ARGUMENTS`
