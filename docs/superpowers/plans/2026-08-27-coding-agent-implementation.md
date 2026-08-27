@@ -644,8 +644,12 @@ Assert that `search_text`:
 - returns `relative/path:line_number:line_text` in stable path/line order;
 - rejects an empty query and unknown fields as `MALFORMED_ARGUMENTS`;
 - skips ignored directories, NUL-containing files, and files larger than 1 MiB;
+- skips every symlink encountered during directory recursion, whether the symlink points to a file or directory;
+- does not read a uniquely matching outside file reached through a symlink located inside the workspace;
 - returns at most 100 matches and a visible truncation marker;
 - returns `FILE_NOT_FOUND`, `NOT_A_FILE`, `DECODE_ERROR`, or path-containment errors with nonempty `error_message` where applicable.
+
+For the outside-file regression test, create an outside UTF-8 file containing a unique literal, create a file symlink to it under the searched workspace directory, search that workspace directory, and assert the unique literal and symlink path are both absent. If the current Windows account cannot create symlinks, skip only this test using the actual `OSError` reason.
 
 - [ ] **Step 2: Write failing read-file tests**
 
@@ -667,6 +671,8 @@ Run: `python -m pytest tests/test_text_tools.py -q`
 Expected: FAIL because the two tools are not implemented.
 
 - [ ] **Step 4: Implement literal search and one-based reading**
+
+For a single-file search, call `WorkspacePaths.resolve_existing()` before reading so a symlink is accepted only when its final resolved target remains inside the workspace. For directory recursion, use `os.walk(..., followlinks=False)`, remove symlink entries from `dirnames` in place, and skip any `candidate.is_symlink()` file before reading; directory search never follows or reads symlinks, including symlinks whose targets are inside the workspace.
 
 Use `Path.read_bytes()` for binary/NUL and 1 MiB checks, then strict UTF-8 decode. When the requested path is one file, invalid UTF-8 returns `DECODE_ERROR`; during directory traversal, binary, oversized, and invalid-UTF-8 files are skipped so one unrelated file does not discard valid matches from the rest of the tree. Search line-by-line with `if query in line`; do not use regex. Use the same fixed ignored-directory set as `list_files`.
 
@@ -805,8 +811,10 @@ Assert:
 - an ordinary test environment variable is inherited;
 - the configured provider key variable and names from `CODING_AGENT_SENSITIVE_ENV_NAMES` are absent;
 - timeouts below 1 or above 120 are `MALFORMED_ARGUMENTS`;
-- a sleeping process returns `COMMAND_TIMEOUT` and preserves any captured partial output;
+- a direct child running `python -c "import time; print('started', flush=True); time.sleep(5)"` with `timeout_seconds=1` returns `COMMAND_TIMEOUT` and preserves `started` when the platform supplies partial output;
 - large output is deterministically truncated before it enters conversation history.
+
+The timeout test must use only that one direct child process. It must not create descendants and must not assert that descendant processes are terminated.
 
 - [ ] **Step 3: Run command tests and observe failure**
 
@@ -832,7 +840,7 @@ completed = subprocess.run(
 )
 ```
 
-Return `ok=true` only for exit code 0. On `TimeoutExpired`, normalize byte/string partial output and return `COMMAND_TIMEOUT`. Do not claim that terminating the direct process guarantees termination of every descendant; retain that limitation in documentation.
+Return `ok=true` only for exit code 0. On `TimeoutExpired`, normalize byte/string partial output and return `COMMAND_TIMEOUT`. Keep the MVP at `subprocess.run(..., shell=True, timeout=...)`; do not add process-group creation, `taskkill`, job objects, or process-tree traversal. Do not claim that terminating the direct process guarantees termination of every descendant; retain that limitation in documentation.
 
 - [ ] **Step 5: Run targeted and full tests**
 
@@ -982,7 +990,7 @@ Expected: FAIL because configuration and prompt modules do not exist.
 
 - [ ] **Step 4: Implement immutable configuration and the short prompt**
 
-Use a frozen dataclass with resolved `Path`, strings, positive integer limits, and `frozenset[str]` sensitive names. Never store a key value in `repr`; either keep the key value outside `RuntimeConfig` or mark a dedicated field `repr=False`.
+Use a frozen dataclass with resolved `Path`, strings, positive integer limits, and `frozenset[str]` sensitive names. The API key is stored in `RuntimeConfig.api_key` and that field must be declared with `dataclasses.field(repr=False)`. Do not add a key-outside-config alternative, SecretStore, credential wrapper, or another secret abstraction.
 
 The prompt must describe `FINAL_RESPONSE` behaviorally without claiming semantic success. It must say that if tests do not exist or cannot run, the final response reports that limitation.
 
