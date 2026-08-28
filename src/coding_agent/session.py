@@ -12,7 +12,7 @@ from typing import Any
 from .protocol import Message, Role, ToolCall
 
 
-SESSION_SCHEMA_VERSION = 1
+SESSION_SCHEMA_VERSION = 2
 
 _ROOT_FIELDS = {
     "schema_version",
@@ -20,10 +20,12 @@ _ROOT_FIELDS = {
     "workspace",
     "provider",
     "model",
+    "name",
     "created_at",
     "updated_at",
     "messages",
 }
+_V1_ROOT_FIELDS = _ROOT_FIELDS - {"name"}
 _SESSION_ID = re.compile(r"[0-9a-f]{12}")
 
 
@@ -50,10 +52,11 @@ class SessionRecord:
     created_at: datetime
     updated_at: datetime
     messages: tuple[Message, ...]
+    name: str | None = None
 
 
 def serialize_session(record: SessionRecord) -> str:
-    """Validate and serialize a session record into the v1 JSON document."""
+    """Validate and serialize a session record into the current JSON document."""
 
     _validate_record(record)
     payload = {
@@ -62,6 +65,7 @@ def serialize_session(record: SessionRecord) -> str:
         "workspace": str(record.workspace),
         "provider": record.provider,
         "model": record.model,
+        "name": record.name,
         "created_at": _format_timestamp(record.created_at),
         "updated_at": _format_timestamp(record.updated_at),
         "messages": [_message_to_payload(message) for message in record.messages],
@@ -70,7 +74,7 @@ def serialize_session(record: SessionRecord) -> str:
 
 
 def deserialize_session(text: str) -> SessionRecord:
-    """Parse and strictly validate a v1 JSON session document."""
+    """Parse and strictly validate a supported JSON session document."""
 
     if type(text) is not str:
         _corrupt("session document must be text")
@@ -85,20 +89,22 @@ def deserialize_session(text: str) -> SessionRecord:
         _corrupt("session schema version is missing")
 
     version = payload["schema_version"]
-    if type(version) in (int, float) and version != SESSION_SCHEMA_VERSION:
+    if type(version) in (int, float) and version not in (1, SESSION_SCHEMA_VERSION):
         raise SessionError("SESSION_VERSION_UNSUPPORTED", "session schema version is unsupported")
-    if type(version) is not int or version != SESSION_SCHEMA_VERSION:
+    if type(version) is not int or version not in (1, SESSION_SCHEMA_VERSION):
         _corrupt("session schema version is invalid")
-    if set(payload) != _ROOT_FIELDS:
+    expected_fields = _V1_ROOT_FIELDS if version == 1 else _ROOT_FIELDS
+    if set(payload) != expected_fields:
         _corrupt("session document fields are invalid")
 
     session_id = _parse_session_id(payload["session_id"])
     workspace = _parse_workspace(payload["workspace"])
     provider = _parse_name(payload["provider"], "provider")
     model = _parse_name(payload["model"], "model")
+    name = None if version == 1 else _parse_optional_session_name(payload["name"])
     created_at = _parse_timestamp(payload["created_at"])
     updated_at = _parse_timestamp(payload["updated_at"])
-    messages = _parse_messages(payload["messages"])
+    messages = _parse_messages(payload["messages"], allow_empty=version == 2)
 
     record = SessionRecord(
         session_id=session_id,
@@ -108,6 +114,7 @@ def deserialize_session(text: str) -> SessionRecord:
         created_at=created_at,
         updated_at=updated_at,
         messages=messages,
+        name=name,
     )
     _validate_record(record)
     return record
@@ -155,6 +162,7 @@ def _validate_record(record: SessionRecord) -> None:
         _corrupt("workspace must be an absolute path")
     _parse_name(record.provider, "provider")
     _parse_name(record.model, "model")
+    _parse_optional_session_name(record.name)
     _format_timestamp(record.created_at)
     _format_timestamp(record.updated_at)
     _validate_messages(record.messages)
@@ -182,6 +190,14 @@ def _parse_workspace(value: Any) -> Path:
 def _parse_name(value: Any, field: str) -> str:
     if type(value) is not str or not value.strip():
         _corrupt(f"{field} is invalid")
+    return value
+
+
+def _parse_optional_session_name(value: Any) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str or value != value.strip() or not value or len(value) > 80:
+        _corrupt("session name is invalid")
     return value
 
 
@@ -226,8 +242,8 @@ def _message_to_payload(message: Message) -> dict[str, Any]:
     _corrupt("system messages cannot be persisted")
 
 
-def _parse_messages(value: Any) -> tuple[Message, ...]:
-    if type(value) is not list or not value:
+def _parse_messages(value: Any, *, allow_empty: bool) -> tuple[Message, ...]:
+    if type(value) is not list or (not value and not allow_empty):
         _corrupt("messages must be a non-empty array")
     messages = tuple(_parse_message(item) for item in value)
     _validate_messages(messages)
@@ -273,8 +289,8 @@ def _parse_tool_call(value: Any) -> ToolCall:
 
 
 def _validate_messages(messages: Any) -> None:
-    if type(messages) is not tuple or not messages:
-        _corrupt("messages must be a non-empty tuple")
+    if type(messages) is not tuple:
+        _corrupt("messages must be a tuple")
     pending: set[str] | None = None
     completed: set[str] = set()
     requires_new_user = False

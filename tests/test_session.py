@@ -22,11 +22,12 @@ UPDATED_AT = datetime(2026, 8, 27, 9, 35, tzinfo=timezone.utc)
 
 def valid_document() -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "session_id": "a1b2c3d4e5f6",
         "workspace": str(WORKSPACE),
         "provider": "openai-compatible",
         "model": "demo-model",
+        "name": "修复 session",
         "created_at": "2026-08-27T09:30:00Z",
         "updated_at": "2026-08-27T09:35:00Z",
         "messages": [
@@ -53,6 +54,7 @@ def valid_record() -> SessionRecord:
         workspace=WORKSPACE,
         provider="openai-compatible",
         model="demo-model",
+        name="修复 session",
         created_at=CREATED_AT,
         updated_at=UPDATED_AT,
         messages=(
@@ -95,11 +97,12 @@ def test_session_round_trip_preserves_protocol_fields_and_canonical_json() -> No
         "workspace",
         "provider",
         "model",
+        "name",
         "created_at",
         "updated_at",
         "messages",
     }
-    assert payload["schema_version"] == SESSION_SCHEMA_VERSION == 1
+    assert payload["schema_version"] == SESSION_SCHEMA_VERSION == 2
     assert payload["created_at"] == "2026-08-27T09:30:00Z"
     assert payload["updated_at"] == "2026-08-27T09:35:00Z"
     assert "你好" in encoded and "\\u4f60" not in encoded
@@ -162,8 +165,8 @@ def test_redaction_replaces_all_message_string_fields_without_mutating_input() -
     [
         ("{", "SESSION_CORRUPT"),
         ("[]", "SESSION_CORRUPT"),
-        (encode({**valid_document(), "schema_version": 2}), "SESSION_VERSION_UNSUPPORTED"),
-        (encode({**valid_document(), "schema_version": 2.0}), "SESSION_VERSION_UNSUPPORTED"),
+        (encode({**valid_document(), "schema_version": 3}), "SESSION_VERSION_UNSUPPORTED"),
+        (encode({**valid_document(), "schema_version": 3.0}), "SESSION_VERSION_UNSUPPORTED"),
         (encode({**valid_document(), "schema_version": "1"}), "SESSION_CORRUPT"),
     ],
 )
@@ -175,8 +178,8 @@ def test_deserialize_rejects_invalid_document_envelope(text: str, error_code: st
 
 def test_deserialize_classifies_future_numeric_versions_before_v1_field_validation() -> None:
     future_document = {
-        "schema_version": 2,
-        "v2_messages": [],
+        "schema_version": 3,
+        "v3_messages": [],
     }
 
     with pytest.raises(SessionError) as raised:
@@ -202,8 +205,8 @@ def test_deserialize_rejects_nonstandard_json_constants_before_duplicate_key_ove
 ) -> None:
     encoded = encode(valid_document())
     nonstandard = encoded.replace(
-        '"schema_version": 1,',
-        f'"schema_version": {constant}, "schema_version": 1,',
+        '"schema_version": 2,',
+        f'"schema_version": {constant}, "schema_version": 2,',
         1,
     )
     assert nonstandard != encoded
@@ -214,7 +217,7 @@ def test_deserialize_rejects_nonstandard_json_constants_before_duplicate_key_ove
     assert raised.value.error_code == "SESSION_CORRUPT"
 
 
-@pytest.mark.parametrize("version", [True, "2", None])
+@pytest.mark.parametrize("version", [True, "3", None])
 def test_deserialize_treats_non_numeric_schema_versions_as_corrupt(version: object) -> None:
     document = valid_document()
     document["schema_version"] = version
@@ -232,10 +235,11 @@ def test_deserialize_treats_non_numeric_schema_versions_as_corrupt(version: obje
         lambda doc: doc.update({"workspace": "relative/path"}),
         lambda doc: doc.update({"provider": "   "}),
         lambda doc: doc.update({"model": ""}),
+        lambda doc: doc.update({"name": 7}),
+        lambda doc: doc.update({"name": " "}),
         lambda doc: doc.update({"created_at": "2026-08-27T09:30:00+00:00"}),
         lambda doc: doc.update({"updated_at": "not-a-timestamp"}),
         lambda doc: doc.update({"messages": {}}),
-        lambda doc: doc.update({"messages": []}),
     ],
 )
 def test_deserialize_rejects_invalid_metadata_and_container_shapes(mutate) -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Protocol
 
 from .protocol import Message, ModelTurn, ToolDefinition
@@ -29,5 +29,19 @@ class ModelClient(Protocol):
         tool_definitions: Sequence[ToolDefinition],
     ) -> ModelTurn:
         """Return one normalized model turn or raise ModelClientError."""
+
+        ...
+
+
+class StreamingModelClient(ModelClient, Protocol):
+    """Optional synchronous streaming extension recognized by AgentRunner."""
+
+    def complete_streaming(
+        self,
+        messages: Sequence[Message],
+        tool_definitions: Sequence[ToolDefinition],
+        text_sink: Callable[[str], None],
+    ) -> ModelTurn:
+        """Emit text chunks and return the complete normalized model turn."""
 
         ...

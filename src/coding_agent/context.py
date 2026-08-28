@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from .protocol import Message, Role, ToolResult
+
+if TYPE_CHECKING:
+    from .summary import SummaryState
 
 
 class ContextBudgetError(ValueError):
@@ -98,6 +102,14 @@ class ContextManager:
         self.max_context_chars = max_context_chars
         self.recent_turns = recent_turns
         self.max_tool_output_chars = max_tool_output_chars
+        self._workspace_memory = ""
+
+    def set_workspace_memory(self, text: str) -> None:
+        """Set a derived context addition without changing conversation history."""
+
+        if type(text) is not str:
+            raise TypeError("workspace memory must be text")
+        self._workspace_memory = text
 
     def prepare_tool_result(self, result: ToolResult) -> ToolResult:
         """Return a result whose output respects the deterministic tool limit."""
@@ -107,7 +119,11 @@ class ContextManager:
             output=truncate_text(result.output, self.max_tool_output_chars),
         )
 
-    def build(self, history: ConversationHistory) -> tuple[Message, ...]:
+    def build(
+        self,
+        history: ConversationHistory,
+        summary: SummaryState | None = None,
+    ) -> tuple[Message, ...]:
         """Keep permanent anchors and the newest complete turns within budget."""
 
         messages = history.messages
@@ -117,19 +133,41 @@ class ContextManager:
                 "system prompt and original user task exceed the context budget"
             )
 
+        additions: tuple[Message, ...] = ()
+        if self._workspace_memory:
+            memory_message = Message(
+                Role.SYSTEM,
+                "Workspace memory (explicit user-maintained facts):\n"
+                + self._workspace_memory,
+            )
+            if _serialized_size(anchors + (memory_message,)) <= self.max_context_chars:
+                additions = (memory_message,)
+        if summary is not None:
+            candidate = Message(
+                Role.SYSTEM,
+                "Conversation summary (derived, not canonical history):\n"
+                + summary.text,
+            )
+            if _serialized_size(anchors + additions + (candidate,)) <= self.max_context_chars:
+                additions += (candidate,)
+
         turns = _group_turns(messages[2:])[-self.recent_turns :]
         if (
             turns
-            and _serialized_size(anchors + tuple(turns[-1]))
+            and _serialized_size(anchors + additions + tuple(turns[-1]))
             > self.max_context_chars
         ):
+            additions = additions[:1]
+        if turns and _serialized_size(anchors + additions + tuple(turns[-1])) > self.max_context_chars:
+            additions = ()
+        if turns and _serialized_size(anchors + tuple(turns[-1])) > self.max_context_chars:
             raise ContextBudgetError(
                 "permanent anchors and latest user-led turn exceed the context budget"
             )
-        while turns and _serialized_size(anchors + _flatten(turns)) > self.max_context_chars:
+        while turns and _serialized_size(anchors + additions + _flatten(turns)) > self.max_context_chars:
             turns.pop(0)
 
-        return anchors + _flatten(turns)
+        return anchors + additions + _flatten(turns)
 
 
 def _group_turns(messages: tuple[Message, ...]) -> list[list[Message]]:

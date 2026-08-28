@@ -9,8 +9,9 @@ import re
 import secrets
 import sys
 import tempfile
+import threading
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -18,10 +19,20 @@ from typing import Any
 from .session import SessionError, SessionRecord, deserialize_session, serialize_session
 
 
-_INDEX_SCHEMA_VERSION = 1
+_INDEX_SCHEMA_VERSION = 2
 _INDEX_FIELDS = {"schema_version", "workspace", "latest_session_id", "session_ids"}
 _SESSION_ID = re.compile(r"[0-9a-f]{12}")
 _SESSION_ID_ATTEMPTS = 100
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSummary:
+    """Small display projection for one workspace session."""
+
+    session_id: str
+    name: str | None
+    updated_at: datetime
+    is_latest: bool
 
 
 def resolve_session_home(environ: Mapping[str, str] | None = None) -> Path:
@@ -68,8 +79,13 @@ class JsonSessionStore:
         self.root = _canonical_session_root(root)
         self._clock = clock
         self._id_generator = id_generator
+        self._lock = threading.RLock()
 
     def create_session(self, workspace: Path, provider: str, model: str) -> SessionRecord:
+        with self._lock:
+            return self._create_session(workspace, provider, model)
+
+    def _create_session(self, workspace: Path, provider: str, model: str) -> SessionRecord:
         canonical = _canonical_workspace(workspace)
         self._validate_root(canonical)
         if type(provider) is not str or not provider.strip() or type(model) is not str or not model.strip():
@@ -101,39 +117,45 @@ class JsonSessionStore:
         raise SessionError("SESSION_SAVE_FAILED", "session id generation failed")
 
     def load_latest(self, workspace: Path) -> SessionRecord | None:
-        canonical = _canonical_workspace(workspace)
-        self._validate_root(canonical)
-        index = self._read_index(canonical, missing_ok=True)
-        if index is None:
-            return None
-        return self.load_session(index["latest_session_id"], canonical)
+        with self._lock:
+            canonical = _canonical_workspace(workspace)
+            self._validate_root(canonical)
+            index = self._read_index(canonical, missing_ok=True)
+            if index is None or index["latest_session_id"] is None:
+                return None
+            return self.load_session(index["latest_session_id"], canonical)
 
     def load_session(self, session_id: str, workspace: Path) -> SessionRecord:
-        canonical = _canonical_workspace(workspace)
-        self._validate_root(canonical)
-        if type(session_id) is not str or _SESSION_ID.fullmatch(session_id) is None:
-            raise SessionError("SESSION_NOT_FOUND", "session was not found")
-        try:
-            text = self._session_path(session_id).read_text(encoding="utf-8")
-        except FileNotFoundError:
-            raise SessionError("SESSION_NOT_FOUND", "session was not found") from None
-        except UnicodeDecodeError:
-            raise SessionError("SESSION_CORRUPT", "session document is not valid UTF-8") from None
-        except OSError:
-            raise SessionError("SESSION_IO_ERROR", "session could not be read") from None
-        record = deserialize_session(text)
-        if record.session_id != session_id:
-            raise SessionError(
-                "SESSION_CORRUPT",
-                "session identifier does not match requested session",
-            )
-        if _workspace_identity(record.workspace) != _workspace_identity(canonical):
-            raise SessionError(
-                "SESSION_WORKSPACE_MISMATCH", "session belongs to a different workspace"
-            )
-        return record
+        with self._lock:
+            canonical = _canonical_workspace(workspace)
+            self._validate_root(canonical)
+            if type(session_id) is not str or _SESSION_ID.fullmatch(session_id) is None:
+                raise SessionError("SESSION_NOT_FOUND", "session was not found")
+            try:
+                text = self._session_path(session_id).read_text(encoding="utf-8")
+            except FileNotFoundError:
+                raise SessionError("SESSION_NOT_FOUND", "session was not found") from None
+            except UnicodeDecodeError:
+                raise SessionError("SESSION_CORRUPT", "session document is not valid UTF-8") from None
+            except OSError:
+                raise SessionError("SESSION_IO_ERROR", "session could not be read") from None
+            record = deserialize_session(text)
+            if record.session_id != session_id:
+                raise SessionError(
+                    "SESSION_CORRUPT",
+                    "session identifier does not match requested session",
+                )
+            if _workspace_identity(record.workspace) != _workspace_identity(canonical):
+                raise SessionError(
+                    "SESSION_WORKSPACE_MISMATCH", "session belongs to a different workspace"
+                )
+            return record
 
     def save(self, record: SessionRecord) -> SessionRecord:
+        with self._lock:
+            return self._save(record)
+
+    def _save(self, record: SessionRecord) -> SessionRecord:
         if not isinstance(record, SessionRecord):
             raise SessionError("SESSION_SAVE_FAILED", "session could not be saved")
         canonical = _canonical_workspace(record.workspace)
@@ -149,16 +171,7 @@ class JsonSessionStore:
         session_ids = [] if current is None else list(current["session_ids"])
         session_ids = [item for item in session_ids if item != persisted.session_id]
         session_ids.append(persisted.session_id)
-        index_text = json.dumps(
-            {
-                "schema_version": _INDEX_SCHEMA_VERSION,
-                "workspace": str(canonical),
-                "latest_session_id": persisted.session_id,
-                "session_ids": session_ids,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+        index_text = _serialize_index(canonical, persisted.session_id, session_ids)
         try:
             _atomic_write_text(self._session_path(persisted.session_id), session_text)
         except (OSError, ValueError):
@@ -171,6 +184,100 @@ class JsonSessionStore:
                 "session was saved but workspace index was not updated",
             ) from None
         return persisted
+
+    def rename_session(self, record: SessionRecord, name: str) -> SessionRecord:
+        """Persist a trimmed display name for a session."""
+
+        if type(name) is not str:
+            raise SessionError("SESSION_NAME_INVALID", "session name is invalid")
+        normalized = name.strip()
+        if not normalized or len(normalized) > 80:
+            raise SessionError(
+                "SESSION_NAME_INVALID", "session name must contain 1 to 80 characters"
+            )
+        with self._lock:
+            return self._save(replace(record, name=normalized))
+
+    def delete_session(self, session_id: str, workspace: Path) -> SessionRecord | None:
+        """Delete one persisted session and return the next latest record."""
+
+        with self._lock:
+            canonical = _canonical_workspace(workspace)
+            self._validate_root(canonical)
+            record = self.load_session(session_id, canonical)
+            index = self._read_index(canonical, missing_ok=False)
+            assert index is not None
+            if session_id not in index["session_ids"]:
+                raise SessionError("SESSION_NOT_FOUND", "session was not found")
+            remaining = [item for item in index["session_ids"] if item != session_id]
+            latest = remaining[-1] if remaining else None
+            source = self._session_path(record.session_id)
+            tombstone = source.with_name(f".{source.name}.deleted")
+            try:
+                os.replace(source, tombstone)
+            except OSError:
+                raise SessionError("SESSION_SAVE_FAILED", "session could not be deleted") from None
+            try:
+                _atomic_write_text(
+                    self._index_path(canonical),
+                    _serialize_index(canonical, latest, remaining),
+                )
+            except (OSError, ValueError):
+                try:
+                    os.replace(tombstone, source)
+                except OSError:
+                    pass
+                raise SessionError(
+                    "SESSION_SAVE_FAILED", "session could not be deleted"
+                ) from None
+            try:
+                tombstone.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+            return self.load_session(latest, canonical) if latest is not None else None
+
+    def list_sessions(self, workspace: Path) -> tuple[SessionSummary, ...]:
+        """List all sessions for one workspace, newest first."""
+
+        with self._lock:
+            canonical = _canonical_workspace(workspace)
+            self._validate_root(canonical)
+            index = self._read_index(canonical, missing_ok=True)
+            if index is None:
+                return ()
+            latest = index["latest_session_id"]
+            records = [self.load_session(item, canonical) for item in index["session_ids"]]
+            records.sort(key=lambda item: item.updated_at, reverse=True)
+            return tuple(
+                SessionSummary(
+                    session_id=record.session_id,
+                    name=record.name,
+                    updated_at=record.updated_at,
+                    is_latest=record.session_id == latest,
+                )
+                for record in records
+            )
+
+    def search_sessions(
+        self, workspace: Path, query: str
+    ) -> tuple[SessionSummary, ...]:
+        """Search names and persisted protocol text within one workspace."""
+
+        if type(query) is not str or not query.strip():
+            raise SessionError("SESSION_SEARCH_INVALID", "search query is required")
+        needle = query.strip().casefold()
+        with self._lock:
+            canonical = _canonical_workspace(workspace)
+            self._validate_root(canonical)
+            summaries = self.list_sessions(canonical)
+            matches: list[SessionSummary] = []
+            for summary in summaries:
+                record = self.load_session(summary.session_id, canonical)
+                if needle in _session_search_text(record).casefold():
+                    matches.append(summary)
+            return tuple(matches)
 
     def _validate_root(self, workspace: Path) -> None:
         self.root = _canonical_session_root(self.root)
@@ -241,7 +348,8 @@ def _workspace_identity(workspace: Path) -> str:
 def _valid_index(document: Any, workspace: Path) -> bool:
     if type(document) is not dict or set(document) != _INDEX_FIELDS:
         return False
-    if type(document["schema_version"]) is not int or document["schema_version"] != 1:
+    version = document["schema_version"]
+    if type(version) is not int or version not in (1, _INDEX_SCHEMA_VERSION):
         return False
     stored_workspace = document["workspace"]
     if type(stored_workspace) is not str or not Path(stored_workspace).is_absolute():
@@ -250,15 +358,43 @@ def _valid_index(document: Any, workspace: Path) -> bool:
         return False
     latest = document["latest_session_id"]
     identifiers = document["session_ids"]
-    if type(latest) is not str or _SESSION_ID.fullmatch(latest) is None:
-        return False
-    if type(identifiers) is not list or not identifiers:
+    if type(identifiers) is not list:
         return False
     if any(type(item) is not str or _SESSION_ID.fullmatch(item) is None for item in identifiers):
+        return False
+    if version == 1 and not identifiers:
+        return False
+    if not identifiers:
+        return version == 2 and latest is None
+    if type(latest) is not str or _SESSION_ID.fullmatch(latest) is None:
         return False
     if len(set(identifiers)) != len(identifiers) or latest not in identifiers:
         return False
     return True
+
+
+def _serialize_index(
+    workspace: Path, latest_session_id: str | None, session_ids: list[str]
+) -> str:
+    return json.dumps(
+        {
+            "schema_version": _INDEX_SCHEMA_VERSION,
+            "workspace": str(workspace),
+            "latest_session_id": latest_session_id,
+            "session_ids": session_ids,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _session_search_text(record: SessionRecord) -> str:
+    values = [record.name or ""]
+    for message in record.messages:
+        values.extend((message.content or "", message.tool_call_id or ""))
+        for call in message.tool_calls:
+            values.extend((call.id, call.name, call.arguments_json))
+    return "\n".join(values)
 
 
 def _is_aware_utc(value: Any) -> bool:

@@ -93,6 +93,7 @@ class RunStatus(str, Enum):
     STALLED = "STALLED"
     MODEL_ERROR = "MODEL_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    CANCELLED = "CANCELLED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +104,7 @@ class RunResult:
     final_text: str | None
     steps: int
     error: str | None
+    streamed: bool = False
 
 
 @dataclass(frozen=True, slots=True)

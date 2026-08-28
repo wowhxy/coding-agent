@@ -73,24 +73,10 @@ class InteractiveSession:
             if stripped.casefold() == "/exit":
                 return 0
 
-            working = self.history.copy()
             try:
-                result = self.runner.run_turn(working, raw)
+                self.execute(raw)
             except KeyboardInterrupt:
                 return 0
-
-            self.result_sink(result)
-            if result.status not in _COMMIT_STATUSES:
-                continue
-
-            persisted = replace(
-                self.record,
-                provider=self.provider,
-                model=self.model,
-                messages=redact_messages(working.persisted_messages, self.sensitive_values),
-            )
-            try:
-                saved = self.store.save(persisted)
             except SessionError as error:
                 self.output(
                     f"[error] {error.error_code}: "
@@ -98,8 +84,39 @@ class InteractiveSession:
                 )
                 return 7
 
-            self.record = saved
-            self.history = working
+    def execute(self, text: str) -> RunResult:
+        """Run one transactional turn and persist committable outcomes."""
+
+        working = self.history.copy()
+        result = self.runner.run_turn(working, text)
+        self.result_sink(result)
+        if result.status not in _COMMIT_STATUSES:
+            return result
+
+        persisted = replace(
+            self.record,
+            provider=self.provider,
+            model=self.model,
+            messages=redact_messages(working.persisted_messages, self.sensitive_values),
+        )
+        saved = self.store.save(persisted)
+        self.record = saved
+        self.history = working
+        return result
+
+    def activate(self, record: SessionRecord) -> None:
+        """Switch this transactional runner to another session record."""
+
+        system_prompt = self.history.messages[0].content or ""
+        self.record = record
+        self.history = (
+            ConversationHistory.from_persisted(system_prompt, record.messages)
+            if record.messages
+            else ConversationHistory(system_prompt)
+        )
+        reset = getattr(self.runner, "reset_context_state", None)
+        if callable(reset):
+            reset()
 
 
 def _redact_text(value: str, sensitive_values: tuple[str, ...]) -> str:

@@ -296,7 +296,7 @@ def test_save_layout_index_schema_and_loading_across_workspaces(tmp_path: Path) 
     assert len(index_path.stem) == 64
     index = json.loads(index_path.read_text(encoding="utf-8"))
     assert index == {
-        "schema_version": 1,
+        "schema_version": 2,
         "workspace": str(workspace_a.resolve()),
         "latest_session_id": "222222222222",
         "session_ids": ["111111111111", "222222222222"],
@@ -422,7 +422,7 @@ def test_load_rejects_session_document_id_that_does_not_match_requested_filename
     "mutate",
     [
         lambda doc: doc.update({"unexpected": True}),
-        lambda doc: doc.update({"schema_version": 2}),
+        lambda doc: doc.update({"schema_version": 3}),
         lambda doc: doc.update({"workspace": "relative"}),
         lambda doc: doc.update({"workspace": "WRONG-ABSOLUTE"}),
         lambda doc: doc.update({"latest_session_id": "BAD"}),
@@ -480,8 +480,8 @@ def test_load_latest_rejects_nonstandard_json_constants_before_duplicate_key_ove
     index_path = root / "workspaces" / f"{workspace_hash(workspace)}.json"
     saved_index = index_path.read_text(encoding="utf-8")
     nonstandard_index = saved_index.replace(
-        '"schema_version": 1,',
-        f'"schema_version": {constant}, "schema_version": 1,',
+        '"schema_version": 2,',
+        f'"schema_version": {constant}, "schema_version": 2,',
         1,
     )
     assert nonstandard_index != saved_index
@@ -502,7 +502,7 @@ def test_session_codec_errors_are_preserved_by_explicit_load(tmp_path: Path) -> 
     assert_error("SESSION_CORRUPT", lambda: store.load_session("111111111111", workspace))
 
     (sessions / "222222222222.json").write_text(
-        json.dumps({"schema_version": 2, "future": True}), encoding="utf-8"
+            json.dumps({"schema_version": 3, "future": True}), encoding="utf-8"
     )
     assert_error("SESSION_VERSION_UNSUPPORTED", lambda: store.load_session("222222222222", workspace))
 

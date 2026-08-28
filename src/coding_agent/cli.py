@@ -14,11 +14,15 @@ from .agent import AgentRunner
 from .config import ConfigError, RuntimeConfig, resolve_config
 from .context import ContextManager, ConversationHistory
 from .interactive import InteractiveSession
+from .interactive_shell import InteractiveShell
 from .model import ModelClient
+from .memory import WorkspaceMemoryStore
 from .protocol import AgentEvent, RunResult, RunStatus
 from .providers.openai_compatible import OpenAICompatibleClient
 from .session import SessionError, SessionRecord
+from .scheduler import BackgroundRuntime, BackgroundScheduler
 from .session_store import JsonSessionStore, resolve_session_home
+from .summary import SummaryManager
 from .system_prompt import SYSTEM_PROMPT
 from .tools import build_default_registry
 
@@ -78,6 +82,7 @@ EXIT_CODES = {
     RunStatus.STALLED: 4,
     RunStatus.MODEL_ERROR: 5,
     RunStatus.INTERNAL_ERROR: 6,
+    RunStatus.CANCELLED: 8,
 }
 
 
@@ -166,7 +171,11 @@ def main(
                 arguments.task,
                 client_factory,
                 arguments.provider,
+                resolve_session_home(runtime_environment),
             )
+        except SessionError as error:
+            _print_session_error(error, config.api_key)
+            return 7
         except Exception as exc:
             print(
                 f"[error] unexpected internal error: {type(exc).__name__}",
@@ -296,6 +305,7 @@ def _run_agent(
     task: str,
     client_factory: ClientFactory,
     provider_name: str,
+    memory_root: Path,
 ) -> RunResult:
     client = client_factory(
         config.base_url,
@@ -311,12 +321,17 @@ def _run_agent(
             recent_turns=config.recent_turns,
             max_tool_output_chars=config.max_tool_output_chars,
         )
+        context_manager.set_workspace_memory(
+            WorkspaceMemoryStore(memory_root).render(config.workspace)
+        )
         runner = AgentRunner(
             model_client=client,
             registry=build_default_registry(config),
             context_manager=context_manager,
             max_steps=config.max_steps,
             event_sink=_event_sink(config.api_key),
+            text_sink=_stream_sink(config.api_key),
+            summary_manager=SummaryManager(client),
         )
         return runner.run(SYSTEM_PROMPT, task)
     finally:
@@ -340,6 +355,9 @@ def _run_interactive(
         store = session_store_factory(
             resolve_session_home(runtime_environment)
         )
+        memory_store = WorkspaceMemoryStore(
+            resolve_session_home(runtime_environment)
+        )
         record, selection = _select_session(
             store,
             config,
@@ -355,6 +373,7 @@ def _run_interactive(
             if record.messages
             else ConversationHistory(SYSTEM_PROMPT)
         )
+        memory_text = memory_store.render(config.workspace)
     except SessionError as error:
         _print_session_error(error, config.api_key)
         return 7
@@ -367,6 +386,7 @@ def _run_interactive(
         config.api_key,
         config.thinking_mode,
     )
+    scheduler: BackgroundScheduler | None = None
     try:
         print(f"[run] workspace: {config.workspace}")
         print(f"[run] provider: {provider_name}; model: {config.model}")
@@ -378,13 +398,52 @@ def _run_interactive(
             recent_turns=config.recent_turns,
             max_tool_output_chars=config.max_tool_output_chars,
         )
+        context_manager.set_workspace_memory(memory_text)
         runner = AgentRunner(
             model_client=client,
             registry=build_default_registry(config),
             context_manager=context_manager,
             max_steps=config.max_steps,
             event_sink=_event_sink(config.api_key),
+            text_sink=_stream_sink(config.api_key),
+            summary_manager=SummaryManager(client),
         )
+
+        def background_runtime() -> BackgroundRuntime:
+            background_memory = memory_store.render(config.workspace)
+            background_client = client_factory(
+                config.base_url,
+                config.model,
+                config.api_key,
+                config.thinking_mode,
+            )
+            background_context = ContextManager(
+                max_context_chars=config.max_context_chars,
+                recent_turns=config.recent_turns,
+                max_tool_output_chars=config.max_tool_output_chars,
+            )
+            close = getattr(background_client, "close", None)
+            try:
+                background_context.set_workspace_memory(background_memory)
+                background_runner = AgentRunner(
+                    model_client=background_client,
+                    registry=build_default_registry(config),
+                    context_manager=background_context,
+                    max_steps=config.max_steps,
+                    event_sink=None,
+                    text_sink=None,
+                    summary_manager=SummaryManager(background_client),
+                )
+                return BackgroundRuntime(
+                    background_runner,
+                    close if callable(close) else (lambda: None),
+                )
+            except Exception:
+                if callable(close):
+                    close()
+                raise
+
+        scheduler = BackgroundScheduler(store, background_runtime)
         interactive = InteractiveSession(
             runner=runner,
             history=history,
@@ -400,8 +459,18 @@ def _run_interactive(
                 config.api_key,
             ),
         )
-        return interactive.run()
+        shell = InteractiveShell(
+            session=interactive,
+            store=store,
+            input_reader=input_reader,
+            output=lambda message: print(message, file=sys.stderr),
+            memory_store=memory_store,
+            scheduler=scheduler,
+        )
+        return shell.run()
     finally:
+        if scheduler is not None:
+            scheduler.shutdown()
         close = getattr(client, "close", None)
         if callable(close):
             close()
@@ -481,8 +550,10 @@ def _event_sink(api_key: str) -> Callable[[AgentEvent], None]:
 
 
 def _print_result(result: RunResult, api_key: str) -> None:
+    if result.streamed:
+        print()
     print(f"[final] protocol status: {result.status.value}")
-    if result.final_text is not None:
+    if result.final_text is not None and not result.streamed:
         print("[response]")
         print(_redact(result.final_text, api_key))
     if result.error is not None:
@@ -490,11 +561,20 @@ def _print_result(result: RunResult, api_key: str) -> None:
 
 
 def _print_interactive_result(result: RunResult, api_key: str) -> None:
+    if result.streamed:
+        print()
     print(f"[final] protocol status: {result.status.value}")
-    if result.final_text:
+    if result.final_text and not result.streamed:
         print(f"agent> {_redact(result.final_text, api_key)}")
     if result.error is not None:
         print(f"[error] {_redact(result.error, api_key)}", file=sys.stderr)
+
+
+def _stream_sink(api_key: str) -> Callable[[str], None]:
+    def emit(chunk: str) -> None:
+        print(_redact(chunk, api_key), end="", flush=True)
+
+    return emit
 
 
 def _redact(text: str, api_key: str) -> str:
