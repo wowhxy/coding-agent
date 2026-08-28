@@ -25,12 +25,18 @@ class OpenAICompatibleClient:
         base_url: str,
         model: str,
         api_key: str,
+        thinking_mode: str = "provider-default",
         http_client: httpx.Client | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._endpoint = f"{base_url.rstrip('/')}/chat/completions"
         self._model = model
         self._api_key = api_key
+        if thinking_mode not in {"provider-default", "disabled"}:
+            raise ValueError(
+                "thinking_mode must be 'provider-default' or 'disabled'"
+            )
+        self._thinking_mode = thinking_mode
         self._sleep = sleep
         self._owns_http_client = http_client is None
         self._http_client = http_client or httpx.Client(timeout=30.0)
@@ -52,6 +58,8 @@ class OpenAICompatibleClient:
             ],
             "stream": False,
         }
+        if self._thinking_mode == "disabled":
+            payload["thinking"] = {"type": "disabled"}
         headers = {"Authorization": f"Bearer {self._api_key}"}
 
         for attempt in range(1, MAX_ATTEMPTS + 1):

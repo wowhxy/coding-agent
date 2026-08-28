@@ -21,6 +21,7 @@ class RuntimeConfig:
     model: str
     api_key: str = field(repr=False)
     api_key_env: str
+    thinking_mode: str
     sensitive_env_names: frozenset[str]
     max_steps: int
     max_context_chars: int
@@ -35,6 +36,7 @@ def resolve_config(
     base_url: str | None = None,
     model: str | None = None,
     api_key_env: str = "OPENAI_API_KEY",
+    thinking_mode: str = "provider-default",
     max_steps: int = 20,
     max_context_chars: int = 80_000,
     recent_turns: int = 8,
@@ -69,6 +71,11 @@ def resolve_config(
             f"{resolved_api_key_env}"
         )
 
+    if thinking_mode not in {"provider-default", "disabled"}:
+        raise ConfigError(
+            "thinking_mode must be 'provider-default' or 'disabled'"
+        )
+
     limits = {
         "max_steps": max_steps,
         "max_context_chars": max_context_chars,
@@ -98,6 +105,7 @@ def resolve_config(
         model=resolved_model,
         api_key=api_key,
         api_key_env=resolved_api_key_env,
+        thinking_mode=thinking_mode,
         sensitive_env_names=frozenset(sensitive_names),
         max_steps=max_steps,
         max_context_chars=max_context_chars,

@@ -18,25 +18,91 @@ def test_history_starts_with_permanent_system_and_user_anchors() -> None:
     )
 
 
-def test_build_keeps_anchors_and_only_recent_complete_turns() -> None:
+def test_history_without_original_task_contains_only_system_message() -> None:
+    history = ConversationHistory("system prompt")
+
+    assert history.messages == (Message(Role.SYSTEM, "system prompt"),)
+    assert history.persisted_messages == ()
+
+
+def test_history_recovery_uses_current_system_prompt() -> None:
+    persisted = (
+        Message(Role.USER, "original task"),
+        Message(Role.ASSISTANT, "completed"),
+    )
+
+    history = ConversationHistory.from_persisted("current system", persisted)
+
+    assert history.messages == (Message(Role.SYSTEM, "current system"),) + persisted
+    assert history.persisted_messages == persisted
+
+
+@pytest.mark.parametrize(
+    "persisted",
+    [
+        (),
+        (Message(Role.ASSISTANT, "not a user task"),),
+        (Message(Role.SYSTEM, "stale system"), Message(Role.USER, "task")),
+        (Message(Role.USER, "task"), Message(Role.SYSTEM, "stale system")),
+    ],
+)
+def test_history_recovery_rejects_invalid_persisted_message_roles(
+    persisted: tuple[Message, ...],
+) -> None:
+    with pytest.raises(ValueError):
+        ConversationHistory.from_persisted("current system", persisted)
+
+
+def test_history_copy_has_independent_mutable_backing_list() -> None:
+    history = ConversationHistory("system", "task")
+    copied = history.copy()
+
+    copied.append(Message(Role.ASSISTANT, "only copied"))
+
+    assert history.messages == (
+        Message(Role.SYSTEM, "system"),
+        Message(Role.USER, "task"),
+    )
+    assert copied.messages[-1] == Message(Role.ASSISTANT, "only copied")
+
+
+def test_recent_turns_one_keeps_latest_user_led_group_beside_anchors() -> None:
     history = ConversationHistory("system", "original task")
-    history.append(Message(Role.ASSISTANT, tool_calls=(ToolCall("1", "x", "{}"),)))
-    history.append(Message(Role.TOOL, "old result", tool_call_id="1"))
-    history.append(Message(Role.ASSISTANT, "new final"))
+    history.append(Message(Role.ASSISTANT, "first-task final"))
+    history.append(Message(Role.USER, "latest request"))
+    history.append(Message(Role.ASSISTANT, "latest response"))
 
     messages = ContextManager(recent_turns=1).build(history)
 
     assert [message.content for message in messages] == [
         "system",
         "original task",
-        "new final",
+        "latest request",
+        "latest response",
     ]
 
 
-def test_recent_tool_turn_keeps_assistant_call_and_all_results_together() -> None:
+def test_first_turn_assistant_tool_tail_remains_selectable_beside_anchors() -> None:
+    call = ToolCall("first-call", "list_files", '{"path":"."}')
+    history = ConversationHistory("system", "original task")
+    history.append(Message(Role.ASSISTANT, tool_calls=(call,)))
+    history.append(Message(Role.TOOL, "files", tool_call_id="first-call"))
+
+    messages = ContextManager(max_context_chars=1_000, recent_turns=1).build(history)
+
+    assert messages == (
+        Message(Role.SYSTEM, "system"),
+        Message(Role.USER, "original task"),
+        Message(Role.ASSISTANT, tool_calls=(call,)),
+        Message(Role.TOOL, "files", tool_call_id="first-call"),
+    )
+
+
+def test_later_user_turn_keeps_tool_call_and_result_batch_together() -> None:
     calls = (ToolCall("2", "read_file", "{}"), ToolCall("3", "search_text", "{}"))
     history = ConversationHistory("system", "task")
-    history.append(Message(Role.ASSISTANT, "older final"))
+    history.append(Message(Role.ASSISTANT, "first-task final"))
+    history.append(Message(Role.USER, "inspect the files"))
     history.append(Message(Role.ASSISTANT, tool_calls=calls))
     history.append(Message(Role.TOOL, "file", tool_call_id="2"))
     history.append(Message(Role.TOOL, "matches", tool_call_id="3"))
@@ -46,23 +112,61 @@ def test_recent_tool_turn_keeps_assistant_call_and_all_results_together() -> Non
     assert messages == (
         Message(Role.SYSTEM, "system"),
         Message(Role.USER, "task"),
+        Message(Role.USER, "inspect the files"),
         Message(Role.ASSISTANT, tool_calls=calls),
         Message(Role.TOOL, "file", tool_call_id="2"),
         Message(Role.TOOL, "matches", tool_call_id="3"),
     )
 
 
-def test_budget_removes_the_oldest_whole_turn_before_newer_turns() -> None:
+def test_budget_removes_oldest_user_led_group_before_newer_groups() -> None:
     history = ConversationHistory("system", "task")
+    history.append(Message(Role.ASSISTANT, "first-task final"))
+    history.append(Message(Role.USER, "older request"))
     history.append(Message(Role.ASSISTANT, "A" * 200))
-    history.append(Message(Role.TOOL, "B" * 200, tool_call_id="old"))
-    history.append(Message(Role.ASSISTANT, "new final"))
+    history.append(Message(Role.USER, "newest request"))
+    history.append(Message(Role.ASSISTANT, "newest final"))
 
     before = history.messages
     messages = ContextManager(max_context_chars=350, recent_turns=2).build(history)
 
-    assert [message.content for message in messages] == ["system", "task", "new final"]
+    assert [message.content for message in messages] == [
+        "system",
+        "task",
+        "newest request",
+        "newest final",
+    ]
     assert history.messages == before
+
+
+def test_later_users_start_distinct_groups_in_deterministic_order() -> None:
+    history = ConversationHistory("system", "task")
+    history.append(Message(Role.ASSISTANT, "first-task final"))
+    history.append(Message(Role.USER, "first follow-up"))
+    history.append(Message(Role.ASSISTANT, "first follow-up final"))
+    history.append(Message(Role.USER, "second follow-up"))
+    history.append(Message(Role.ASSISTANT, "second follow-up final"))
+
+    messages = ContextManager(recent_turns=2).build(history)
+
+    assert [message.content for message in messages] == [
+        "system",
+        "task",
+        "first follow-up",
+        "first follow-up final",
+        "second follow-up",
+        "second follow-up final",
+    ]
+
+
+def test_build_rejects_oversized_latest_user_group_instead_of_dropping_it() -> None:
+    history = ConversationHistory("system", "task")
+    history.append(Message(Role.ASSISTANT, "first-task final"))
+    history.append(Message(Role.USER, "latest request" * 30))
+    history.append(Message(Role.ASSISTANT, "latest tail" * 30))
+
+    with pytest.raises(ContextBudgetError, match="latest user-led turn"):
+        ContextManager(max_context_chars=200, recent_turns=1).build(history)
 
 
 def test_build_rejects_anchors_that_exceed_the_total_budget() -> None:

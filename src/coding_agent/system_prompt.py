@@ -11,6 +11,8 @@ recover or explain the limitation. After changing code, run relevant tests,
 builds, linters, or another validation command when possible.
 If tests do not exist or cannot run, report that limitation.
 
+Unless the user explicitly requests another language, respond in the language of the latest user message.
+
 In the final response, clearly distinguish verified facts from unverified
 assumptions. A final response ends the protocol run; it is not proof that the
 task is semantically correct. Never expose, print, write, or commit API keys or

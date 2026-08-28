@@ -9,23 +9,54 @@ from .protocol import Message, Role, ToolResult
 
 
 class ContextBudgetError(ValueError):
-    """Raised when permanent conversation anchors exceed the context budget."""
+    """Raised when permanent anchors or a required latest turn exceed the context budget."""
 
 
 class ConversationHistory:
     """Canonical in-memory history with permanent system and task anchors."""
 
-    def __init__(self, system_prompt: str, original_user_task: str) -> None:
-        self._messages = [
-            Message(Role.SYSTEM, system_prompt),
-            Message(Role.USER, original_user_task),
-        ]
+    def __init__(
+        self, system_prompt: str, original_user_task: str | None = None
+    ) -> None:
+        self._messages = [Message(Role.SYSTEM, system_prompt)]
+        if original_user_task is not None:
+            self._messages.append(Message(Role.USER, original_user_task))
+
+    @classmethod
+    def from_persisted(
+        cls, system_prompt: str, messages: tuple[Message, ...]
+    ) -> ConversationHistory:
+        """Restore persisted non-system messages under the current policy."""
+
+        if not messages:
+            raise ValueError("persisted history must not be empty")
+        if messages[0].role is not Role.USER:
+            raise ValueError("first persisted message must be a user message")
+        if any(message.role is Role.SYSTEM for message in messages):
+            raise ValueError("persisted history must not contain system messages")
+
+        history = cls(system_prompt)
+        history._messages.extend(messages)
+        return history
 
     @property
     def messages(self) -> tuple[Message, ...]:
         """Return an immutable snapshot of the canonical history."""
 
         return tuple(self._messages)
+
+    @property
+    def persisted_messages(self) -> tuple[Message, ...]:
+        """Return an immutable snapshot excluding the current system message."""
+
+        return tuple(self._messages[1:])
+
+    def copy(self) -> ConversationHistory:
+        """Return a history whose mutable backing list is independent."""
+
+        copied = type(self)(self._messages[0].content or "")
+        copied._messages = list(self._messages)
+        return copied
 
     def append(self, message: Message) -> None:
         """Append one message without altering either permanent anchor."""
@@ -87,6 +118,14 @@ class ContextManager:
             )
 
         turns = _group_turns(messages[2:])[-self.recent_turns :]
+        if (
+            turns
+            and _serialized_size(anchors + tuple(turns[-1]))
+            > self.max_context_chars
+        ):
+            raise ContextBudgetError(
+                "permanent anchors and latest user-led turn exceed the context budget"
+            )
         while turns and _serialized_size(anchors + _flatten(turns)) > self.max_context_chars:
             turns.pop(0)
 
@@ -96,7 +135,7 @@ class ContextManager:
 def _group_turns(messages: tuple[Message, ...]) -> list[list[Message]]:
     turns: list[list[Message]] = []
     for message in messages:
-        if message.role is Role.ASSISTANT or not turns:
+        if message.role is Role.USER or not turns:
             turns.append([message])
         else:
             turns[-1].append(message)

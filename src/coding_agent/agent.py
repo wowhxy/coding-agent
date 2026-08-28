@@ -43,9 +43,14 @@ class AgentRunner:
     def run(self, system_prompt: str, original_user_task: str) -> RunResult:
         """Run one task, distinguishing protocol termination from correctness."""
 
+        return self.run_turn(ConversationHistory(system_prompt), original_user_task)
+
+    def run_turn(self, history: ConversationHistory, user_message: str) -> RunResult:
+        """Run one user turn against and append to a canonical history."""
+
         step = 0
         try:
-            history = ConversationHistory(system_prompt, original_user_task)
+            history.append(Message(Role.USER, user_message))
             last_failure: FailureFingerprint | None = None
             consecutive_failures = 0
 
@@ -108,6 +113,7 @@ class AgentRunner:
                     continue
 
                 if model_turn.final_text and model_turn.final_text.strip():
+                    history.append(Message(Role.ASSISTANT, model_turn.final_text))
                     return self._finish(
                         RunStatus.FINAL_RESPONSE,
                         model_turn.final_text,

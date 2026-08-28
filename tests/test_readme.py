@@ -15,6 +15,24 @@ def test_submission_readme_constraints() -> None:
     assert "运行" in text
     assert "特色" in text
     assert "API Key" in text
+    assert "OPENAI_API_KEY" in text
+    assert "DEEPSEEK_API_KEY" in text
+    assert "--thinking-mode disabled" in text
+    assert 'python -m coding_agent --provider deepseek "<任务>"' in text
+    assert 'coding-agent --provider deepseek "<任务>"' in text
+    assert "python -m coding_agent --provider deepseek" in text.splitlines()
+    assert "/exit" in text
+    assert "Ctrl+C" in text
+    assert "/exit 或输入阶段 Ctrl+C 正常退出" in text
+    assert "运行阶段 Ctrl+C 丢弃未完成当前轮次" in text
+    assert "无已提交轮次的新会话不留下 session 文件" in text
+    assert "默认交互启动恢复当前 workspace 的最近 session" in text
+    assert "--new-session" in text
+    assert "--resume-session" in text
+    assert "本地 session JSON 是明文" in text
+    assert "任务、源码和工具输出" in text
+    assert "不要粘贴秘密" in text
+    assert "FINAL_RESPONSE 和持久化成功都不证明任务语义正确" in text
     lines = text.splitlines()
     assert lines[1].startswith("Git 仓库：")
     repository_url = lines[1].removeprefix("Git 仓库：")

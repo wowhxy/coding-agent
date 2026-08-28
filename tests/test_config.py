@@ -27,6 +27,7 @@ def test_resolve_config_applies_documented_defaults(tmp_path: Path) -> None:
     assert config.model == "environment-model"
     assert config.api_key == "fake-config-key"
     assert config.api_key_env == "OPENAI_API_KEY"
+    assert config.thinking_mode == "provider-default"
     assert config.sensitive_env_names == frozenset({"OPENAI_API_KEY"})
     assert config.max_steps == 20
     assert config.max_context_chars == 80_000
@@ -47,6 +48,32 @@ def test_resolve_config_prefers_explicit_base_url_and_model(
 
     assert config.base_url == "https://explicit.test/api"
     assert config.model == "explicit-model"
+
+
+def test_resolve_config_supports_deepseek_non_thinking_mode(
+    tmp_path: Path,
+) -> None:
+    config = resolve_config(
+        workspace=tmp_path,
+        base_url="https://api.deepseek.com",
+        model="deepseek-v4-flash",
+        api_key_env="DEEPSEEK_API_KEY",
+        thinking_mode="disabled",
+        environ={"DEEPSEEK_API_KEY": "fake-deepseek-key"},
+    )
+
+    assert config.thinking_mode == "disabled"
+    assert config.api_key_env == "DEEPSEEK_API_KEY"
+    assert config.sensitive_env_names == frozenset({"DEEPSEEK_API_KEY"})
+
+
+def test_resolve_config_rejects_unknown_thinking_mode(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="thinking_mode"):
+        resolve_config(
+            workspace=tmp_path,
+            thinking_mode="enabled",
+            environ=_environment(),
+        )
 
 
 @pytest.mark.parametrize(
@@ -189,6 +216,13 @@ def test_system_prompt_separates_protocol_end_from_semantic_correctness() -> Non
     assert "not proof" in prompt
     assert "tests do not exist or cannot run" in prompt
     assert "report that limitation" in prompt
+
+
+def test_system_prompt_requires_latest_user_message_language_by_default() -> None:
+    assert (
+        "Unless the user explicitly requests another language, respond in the "
+        "language of the latest user message."
+    ) in SYSTEM_PROMPT
 
 
 @pytest.mark.parametrize(

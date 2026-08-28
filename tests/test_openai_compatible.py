@@ -23,6 +23,7 @@ FINAL_PAYLOAD = {
 def _adapter(
     handler: Callable[[httpx.Request], httpx.Response],
     *,
+    thinking_mode: str = "provider-default",
     sleep: Callable[[float], None] = lambda _: None,
 ) -> tuple[OpenAICompatibleClient, httpx.Client]:
     http_client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -30,6 +31,7 @@ def _adapter(
         "https://example.test/v1/",
         "test-model",
         FAKE_API_KEY,
+        thinking_mode=thinking_mode,
         http_client=http_client,
         sleep=sleep,
     )
@@ -125,6 +127,22 @@ def test_complete_maps_internal_request_to_openai_compatible_shape() -> None:
     serialized = json.dumps(payload)
     assert "code_interpreter" not in serialized
     assert "file_search" not in serialized
+
+
+def test_complete_disables_thinking_for_deepseek_tool_calls() -> None:
+    captured: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json=FINAL_PAYLOAD)
+
+    adapter, http_client = _adapter(handler, thinking_mode="disabled")
+    try:
+        adapter.complete((Message(Role.USER, "task"),), ())
+    finally:
+        http_client.close()
+
+    assert captured[0]["thinking"] == {"type": "disabled"}
 
 
 def test_complete_parses_final_response() -> None:

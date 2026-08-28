@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from coding_agent.agent import AgentRunner
-from coding_agent.context import ContextManager
+from coding_agent.context import ContextManager, ConversationHistory
 from coding_agent.model import ModelTransportError
 from coding_agent.protocol import (
     AgentEvent,
@@ -74,6 +74,44 @@ def test_nonempty_final_is_protocol_level_termination() -> None:
     assert result.final_text == "finished"
     assert result.steps == 1
     assert result.error is None
+
+
+def test_run_turn_retains_two_user_turns_and_final_assistant_messages() -> None:
+    model = FakeModelClient([ModelTurn("first answer"), ModelTurn("second answer")])
+    runner = AgentRunner(model, ToolRegistry(), ContextManager())
+    history = ConversationHistory("system")
+
+    first = runner.run_turn(history, "first question")
+    second = runner.run_turn(history, "second question")
+
+    assert first.status is RunStatus.FINAL_RESPONSE
+    assert second.status is RunStatus.FINAL_RESPONSE
+    assert history.messages == (
+        Message(Role.SYSTEM, "system"),
+        Message(Role.USER, "first question"),
+        Message(Role.ASSISTANT, "first answer"),
+        Message(Role.USER, "second question"),
+        Message(Role.ASSISTANT, "second answer"),
+    )
+
+
+def test_each_run_turn_has_a_fresh_one_step_budget() -> None:
+    model = FakeModelClient(
+        [
+            ModelTurn(tool_calls=(ToolCall("first", "missing", "{}"),)),
+            ModelTurn(tool_calls=(ToolCall("second", "missing", "{}"),)),
+        ]
+    )
+    runner = AgentRunner(model, ToolRegistry(), ContextManager(), max_steps=1)
+    history = ConversationHistory("system")
+
+    first = runner.run_turn(history, "first question")
+    second = runner.run_turn(history, "second question")
+
+    assert first.status is RunStatus.MAX_STEPS
+    assert second.status is RunStatus.MAX_STEPS
+    assert first.steps == second.steps == 1
+    assert len(model.calls) == 2
 
 
 @pytest.mark.parametrize("final_text", [None, "", "   "])

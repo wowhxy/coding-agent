@@ -3,20 +3,75 @@
 from __future__ import annotations
 
 import argparse
+import getpass
+import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 
 from .agent import AgentRunner
 from .config import ConfigError, RuntimeConfig, resolve_config
-from .context import ContextManager
+from .context import ContextManager, ConversationHistory
+from .interactive import InteractiveSession
 from .model import ModelClient
 from .protocol import AgentEvent, RunResult, RunStatus
 from .providers.openai_compatible import OpenAICompatibleClient
+from .session import SessionError, SessionRecord
+from .session_store import JsonSessionStore, resolve_session_home
 from .system_prompt import SYSTEM_PROMPT
 from .tools import build_default_registry
 
 
-ClientFactory = Callable[[str, str, str], ModelClient]
+ClientFactory = Callable[[str, str, str, str], ModelClient]
+SecretReader = Callable[[str], str]
+SessionStoreFactory = Callable[[Path], JsonSessionStore]
+InputReader = Callable[[str], str]
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderPreset:
+    base_url: str | None
+    model: str | None
+    api_key_env: str
+    thinking_mode: str
+    display_name: str
+
+
+_PROVIDER_PRESETS = {
+    "custom": _ProviderPreset(
+        None,
+        None,
+        "OPENAI_API_KEY",
+        "provider-default",
+        "Provider",
+    ),
+    "deepseek": _ProviderPreset(
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        "DEEPSEEK_API_KEY",
+        "disabled",
+        "DeepSeek",
+    ),
+    "openai": _ProviderPreset(
+        "https://api.openai.com/v1",
+        None,
+        "OPENAI_API_KEY",
+        "provider-default",
+        "OpenAI",
+    ),
+}
+_RESERVED_API_KEY_ENV_NAMES = {
+    name.casefold(): name
+    for name in (
+        "CODING_AGENT_BASE_URL",
+        "CODING_AGENT_MODEL",
+        "CODING_AGENT_SENSITIVE_ENV_NAMES",
+        "CODING_AGENT_HOME",
+        "LOCALAPPDATA",
+        "XDG_DATA_HOME",
+    )
+}
 EXIT_CODES = {
     RunStatus.FINAL_RESPONSE: 0,
     RunStatus.MAX_STEPS: 3,
@@ -30,8 +85,11 @@ def main(
     argv: Sequence[str] | None = None,
     environ: Mapping[str, str] | None = None,
     client_factory: ClientFactory = OpenAICompatibleClient,
+    secret_reader: SecretReader | None = None,
+    session_store_factory: SessionStoreFactory = JsonSessionStore,
+    input_reader: InputReader = input,
 ) -> int:
-    """Run one coding task and return a stable process exit code."""
+    """Run one coding task or an interactive session."""
 
     parser = _build_parser()
     parsed_argv = list(sys.argv[1:] if argv is None else argv)
@@ -47,31 +105,88 @@ def main(
         return 2
     try:
         arguments = parser.parse_args(parsed_argv)
+        if arguments.task is not None and (
+            arguments.new_session
+            or arguments.resume_session is not None
+        ):
+            parser.error(
+                "--new-session and --resume-session are only valid "
+                "in interactive mode"
+            )
     except SystemExit as exc:
         return int(exc.code)
+
+    preset = _PROVIDER_PRESETS[arguments.provider]
+    api_key_env = (arguments.api_key_env or preset.api_key_env).strip()
+    reserved_name = _RESERVED_API_KEY_ENV_NAMES.get(
+        api_key_env.casefold()
+    )
+    if reserved_name is not None:
+        print(
+            "[error] API key environment variable "
+            f"{reserved_name} is reserved",
+            file=sys.stderr,
+        )
+        return 2
+
+    runtime_environment = dict(os.environ if environ is None else environ)
+    if not runtime_environment.get(api_key_env):
+        reader = secret_reader
+        if reader is None and sys.stdin.isatty():
+            reader = getpass.getpass
+        if reader is not None:
+            api_key = reader(f"{preset.display_name} API Key (input hidden): ")
+            if api_key:
+                runtime_environment[api_key_env] = api_key
 
     try:
         config = resolve_config(
             workspace=arguments.workspace,
-            base_url=arguments.base_url,
-            model=arguments.model,
-            api_key_env=arguments.api_key_env,
+            base_url=_prefer_explicit(arguments.base_url, preset.base_url),
+            model=_prefer_explicit(arguments.model, preset.model),
+            api_key_env=api_key_env,
+            thinking_mode=(
+                arguments.thinking_mode or preset.thinking_mode
+            ),
             max_steps=arguments.max_steps,
             max_context_chars=arguments.max_context_chars,
             recent_turns=arguments.recent_turns,
             max_tool_output_chars=arguments.max_tool_output_chars,
             command_timeout=arguments.command_timeout,
-            environ=environ,
+            environ=runtime_environment,
         )
     except ConfigError as exc:
         print(f"[error] {exc}", file=sys.stderr)
         return 2
 
+    if arguments.task is not None:
+        try:
+            result = _run_agent(
+                config,
+                arguments.task,
+                client_factory,
+                arguments.provider,
+            )
+        except Exception as exc:
+            print(
+                f"[error] unexpected internal error: {type(exc).__name__}",
+                file=sys.stderr,
+            )
+            return 6
+
+        _print_result(result, config.api_key)
+        return EXIT_CODES[result.status]
+
     try:
-        result = _run_agent(
-            config,
-            arguments.task,
-            client_factory,
+        return _run_interactive(
+            config=config,
+            provider_name=arguments.provider,
+            new_session=arguments.new_session,
+            resume_session=arguments.resume_session,
+            runtime_environment=runtime_environment,
+            client_factory=client_factory,
+            session_store_factory=session_store_factory,
+            input_reader=input_reader,
         )
     except Exception as exc:
         print(
@@ -80,21 +195,45 @@ def main(
         )
         return 6
 
-    _print_result(result, config.api_key)
-    return EXIT_CODES[result.status]
-
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="coding-agent",
-        description="Run one local coding-agent task.",
+        description=(
+            "Run one local coding-agent task, or start an interactive "
+            "session when task is omitted."
+        ),
         allow_abbrev=False,
     )
-    parser.add_argument("task", help="coding task for the agent")
+    parser.add_argument(
+        "task",
+        nargs="?",
+        help="coding task for one-shot mode (omit for interactive mode)",
+    )
+    session_group = parser.add_mutually_exclusive_group()
+    session_group.add_argument(
+        "--new-session",
+        action="store_true",
+        help="create a new interactive session",
+    )
+    session_group.add_argument(
+        "--resume-session",
+        metavar="SESSION_ID",
+        help="resume an interactive session by ID",
+    )
     parser.add_argument(
         "--workspace",
-        required=True,
-        help="existing workspace directory used by all local tools",
+        default=".",
+        help=(
+            "existing workspace directory used by all local tools "
+            "(default: current directory)"
+        ),
+    )
+    parser.add_argument(
+        "--provider",
+        choices=tuple(_PROVIDER_PRESETS),
+        default="custom",
+        help="provider defaults to apply (default: custom)",
     )
     parser.add_argument(
         "--base-url",
@@ -106,9 +245,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--api-key-env",
-        default="OPENAI_API_KEY",
+        default=None,
         metavar="NAME",
         help="environment-variable name containing the API key",
+    )
+    parser.add_argument(
+        "--thinking-mode",
+        choices=("provider-default", "disabled"),
+        default=None,
+        help=(
+            "override provider thinking mode "
+            "(default: provider preset)"
+        ),
     )
     parser.add_argument(
         "--max-steps",
@@ -147,8 +295,16 @@ def _run_agent(
     config: RuntimeConfig,
     task: str,
     client_factory: ClientFactory,
+    provider_name: str,
 ) -> RunResult:
-    client = client_factory(config.base_url, config.model, config.api_key)
+    client = client_factory(
+        config.base_url,
+        config.model,
+        config.api_key,
+        config.thinking_mode,
+    )
+    print(f"[run] workspace: {config.workspace}")
+    print(f"[run] provider: {provider_name}; model: {config.model}")
     try:
         context_manager = ContextManager(
             max_context_chars=config.max_context_chars,
@@ -167,6 +323,150 @@ def _run_agent(
         close = getattr(client, "close", None)
         if callable(close):
             close()
+
+
+def _run_interactive(
+    *,
+    config: RuntimeConfig,
+    provider_name: str,
+    new_session: bool,
+    resume_session: str | None,
+    runtime_environment: Mapping[str, str],
+    client_factory: ClientFactory,
+    session_store_factory: SessionStoreFactory,
+    input_reader: InputReader,
+) -> int:
+    try:
+        store = session_store_factory(
+            resolve_session_home(runtime_environment)
+        )
+        record, selection = _select_session(
+            store,
+            config,
+            provider_name,
+            new_session,
+            resume_session,
+        )
+        history = (
+            ConversationHistory.from_persisted(
+                SYSTEM_PROMPT,
+                record.messages,
+            )
+            if record.messages
+            else ConversationHistory(SYSTEM_PROMPT)
+        )
+    except SessionError as error:
+        _print_session_error(error, config.api_key)
+        return 7
+
+    _print_session_warnings(record, provider_name, config)
+
+    client = client_factory(
+        config.base_url,
+        config.model,
+        config.api_key,
+        config.thinking_mode,
+    )
+    try:
+        print(f"[run] workspace: {config.workspace}")
+        print(f"[run] provider: {provider_name}; model: {config.model}")
+        print(f"[session] {selection}: {record.session_id}")
+        print("[session] enter /exit or press Ctrl+C to save and exit")
+
+        context_manager = ContextManager(
+            max_context_chars=config.max_context_chars,
+            recent_turns=config.recent_turns,
+            max_tool_output_chars=config.max_tool_output_chars,
+        )
+        runner = AgentRunner(
+            model_client=client,
+            registry=build_default_registry(config),
+            context_manager=context_manager,
+            max_steps=config.max_steps,
+            event_sink=_event_sink(config.api_key),
+        )
+        interactive = InteractiveSession(
+            runner=runner,
+            history=history,
+            record=record,
+            store=store,
+            provider=provider_name,
+            model=config.model,
+            sensitive_values=(config.api_key,),
+            input_reader=input_reader,
+            output=lambda message: print(message, file=sys.stderr),
+            result_sink=lambda result: _print_interactive_result(
+                result,
+                config.api_key,
+            ),
+        )
+        return interactive.run()
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+
+def _select_session(
+    store: JsonSessionStore,
+    config: RuntimeConfig,
+    provider_name: str,
+    new_session: bool,
+    resume_session: str | None,
+) -> tuple[SessionRecord, str]:
+    if new_session:
+        return (
+            store.create_session(
+                config.workspace,
+                provider_name,
+                config.model,
+            ),
+            "created",
+        )
+    if resume_session is not None:
+        return (
+            store.load_session(resume_session, config.workspace),
+            "resumed",
+        )
+    latest = store.load_latest(config.workspace)
+    if latest is not None:
+        return latest, "resumed"
+    return (
+        store.create_session(
+            config.workspace,
+            provider_name,
+            config.model,
+        ),
+        "created",
+    )
+
+
+def _print_session_warnings(
+    record: SessionRecord,
+    provider_name: str,
+    config: RuntimeConfig,
+) -> None:
+    if record.provider != provider_name:
+        print(
+            "[warning] session provider changed: "
+            f"{_redact(record.provider, config.api_key)} -> "
+            f"{_redact(provider_name, config.api_key)}",
+            file=sys.stderr,
+        )
+    if record.model != config.model:
+        print(
+            "[warning] session model changed: "
+            f"{_redact(record.model, config.api_key)} -> "
+            f"{_redact(config.model, config.api_key)}",
+            file=sys.stderr,
+        )
+
+
+def _print_session_error(error: SessionError, api_key: str) -> None:
+    print(
+        f"[error] {error.error_code}: {_redact(error.message, api_key)}",
+        file=sys.stderr,
+    )
 
 
 def _event_sink(api_key: str) -> Callable[[AgentEvent], None]:
@@ -189,7 +489,22 @@ def _print_result(result: RunResult, api_key: str) -> None:
         print(f"[error] {_redact(result.error, api_key)}", file=sys.stderr)
 
 
+def _print_interactive_result(result: RunResult, api_key: str) -> None:
+    print(f"[final] protocol status: {result.status.value}")
+    if result.final_text:
+        print(f"agent> {_redact(result.final_text, api_key)}")
+    if result.error is not None:
+        print(f"[error] {_redact(result.error, api_key)}", file=sys.stderr)
+
+
 def _redact(text: str, api_key: str) -> str:
     if not api_key:
         return text
     return text.replace(api_key, "[REDACTED]")
+
+
+def _prefer_explicit(
+    explicit: str | None,
+    preset: str | None,
+) -> str | None:
+    return explicit if explicit is not None else preset
