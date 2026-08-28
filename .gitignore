@@ -1,0 +1,37 @@
+# Python bytecode and interpreter caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test, coverage, and tool caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging and build output
+*.egg-info/
+build/
+dist/
+
+# Local virtual environments
+.venv/
+venv/
+env/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Local development orchestration artifacts
+.superpowers/
+
+# Assignment brief retained locally, not submitted in the repository
+/推免考核题目学生版.pdf
+
+# Common editor and OS artifacts
+.DS_Store
+Thumbs.db
