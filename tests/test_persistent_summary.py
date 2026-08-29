@@ -43,7 +43,7 @@ def _record(workspace: Path) -> SessionRecord:
     )
 
 
-def test_session_v3_round_trip_persists_summary_and_v2_migrates_to_none(
+def test_session_v4_round_trip_persists_versioned_summary_and_old_versions_migrate(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -52,17 +52,22 @@ def test_session_v3_round_trip_persists_summary_and_v2_migrates_to_none(
 
     payload = json.loads(serialize_session(record))
     restored = deserialize_session(json.dumps(payload))
+    v3 = json.loads(json.dumps(payload))
+    v3["schema_version"] = 3
+    del v3["summary"]["schema_version"]
     v2 = dict(payload)
     v2["schema_version"] = 2
     del v2["summary"]
 
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert payload["summary"] == {
+        "schema_version": 1,
         "text": "existing summary",
         "covered_message_count": 1,
         "updated_at": "2026-08-29T08:05:00Z",
     }
     assert restored == record
+    assert deserialize_session(json.dumps(v3)).summary == record.summary
     assert deserialize_session(json.dumps(v2)).summary is None
 
 
@@ -77,15 +82,20 @@ def test_corrupt_or_out_of_range_summary_is_dropped_without_losing_history(
     corrupt["summary"] = {"text": 7}
     out_of_range = dict(payload)
     out_of_range["summary"] = {
+        "schema_version": 1,
         "text": "bad coverage",
         "covered_message_count": 99,
         "updated_at": "2026-08-29T08:05:00Z",
     }
+    unsupported_summary = dict(payload)
+    unsupported_summary["summary"] = dict(payload["summary"], schema_version=99)
 
     assert deserialize_session(json.dumps(corrupt)).messages == _messages()
     assert deserialize_session(json.dumps(corrupt)).summary is None
     assert deserialize_session(json.dumps(out_of_range)).messages == _messages()
     assert deserialize_session(json.dumps(out_of_range)).summary is None
+    assert deserialize_session(json.dumps(unsupported_summary)).messages == _messages()
+    assert deserialize_session(json.dumps(unsupported_summary)).summary is None
 
 
 def test_summary_is_saved_recovered_and_only_newly_old_messages_are_processed(

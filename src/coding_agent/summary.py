@@ -19,6 +19,7 @@ class SummaryState:
     text: str
     covered_message_count: int
     updated_at: datetime
+    schema_version: int = 1
 
 
 class SummaryManager:
@@ -44,13 +45,17 @@ class SummaryManager:
         self,
         history: ConversationHistory,
         previous: SummaryState | None = None,
+        *,
+        force: bool = False,
     ) -> SummaryState | None:
         """Return an updated summary, falling back safely on any model failure."""
 
         messages = history.messages
-        if _history_size(messages) <= self.threshold_chars:
+        if not force and _history_size(messages) <= self.threshold_chars:
             return previous
         old_messages = _old_messages(messages[2:], self.recent_turns)
+        if not _valid_previous(previous, len(old_messages)):
+            previous = None
         covered = 0 if previous is None else previous.covered_message_count
         if len(old_messages) <= covered:
             return previous
@@ -71,6 +76,22 @@ class SummaryManager:
             return SummaryState(text, len(old_messages), updated_at)
         except Exception:
             return previous
+
+
+def _valid_previous(previous: SummaryState | None, old_message_count: int) -> bool:
+    if previous is None:
+        return True
+    return (
+        isinstance(previous, SummaryState)
+        and previous.schema_version == 1
+        and isinstance(previous.text, str)
+        and bool(previous.text.strip())
+        and type(previous.covered_message_count) is int
+        and 0 < previous.covered_message_count <= old_message_count
+        and isinstance(previous.updated_at, datetime)
+        and previous.updated_at.tzinfo is not None
+        and previous.updated_at.utcoffset() == timedelta(0)
+    )
 
 
 def _old_messages(messages: tuple[Message, ...], recent_turns: int) -> tuple[Message, ...]:

@@ -279,6 +279,31 @@ class JsonSessionStore:
                     matches.append(summary)
             return tuple(matches)
 
+    def load_recall_records(self, workspace: Path) -> tuple[SessionRecord, ...]:
+        """Load same-workspace canonical sessions, skipping malformed individuals."""
+
+        with self._lock:
+            canonical = _canonical_workspace(workspace)
+            self._validate_root(canonical)
+            index = self._read_index(canonical, missing_ok=True)
+            if index is None:
+                return ()
+            records: list[SessionRecord] = []
+            for session_id in index["session_ids"]:
+                try:
+                    records.append(self.load_session(session_id, canonical))
+                except SessionError as error:
+                    if error.error_code in {
+                        "SESSION_NOT_FOUND",
+                        "SESSION_CORRUPT",
+                        "SESSION_VERSION_UNSUPPORTED",
+                        "SESSION_WORKSPACE_MISMATCH",
+                        "SESSION_IO_ERROR",
+                    }:
+                        continue
+                    raise
+            return tuple(records)
+
     def _validate_root(self, workspace: Path) -> None:
         self.root = _canonical_session_root(self.root)
         try:

@@ -37,6 +37,11 @@ def test_submission_readme_constraints() -> None:
     assert "/skills" in text
     assert "/skill use" in text
     assert "automatic" in text
+    assert "/recall <query>" in text
+    assert "渐进压缩" in text
+    assert "增量摘要" in text
+    assert "确认后" in text
+    assert "workspace 隔离" in text
     lines = text.splitlines()
     assert lines[1].startswith("Git 仓库：")
     repository_url = lines[1].removeprefix("Git 仓库：")

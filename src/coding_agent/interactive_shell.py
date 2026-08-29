@@ -8,6 +8,7 @@ from .interactive import InteractiveSession, _redact_text
 from .memory import WorkspaceMemoryStore
 from .memory_candidate import MemoryCandidateExtractor, is_safe_candidate
 from .protocol import Message, RunStatus
+from .recall import RecallEntry, RecallService, should_automatic_recall
 from .session import SessionError
 from .scheduler import BackgroundScheduler
 from .session_store import JsonSessionStore, SessionSummary
@@ -30,6 +31,7 @@ class InteractiveShell:
         skill_registry: SkillRegistry | None = None,
         manual_skills: ManualSkillState | None = None,
         skill_activator: SkillActivator | None = None,
+        recall_service: RecallService | None = None,
     ) -> None:
         self.session = session
         self.store = store
@@ -41,6 +43,8 @@ class InteractiveShell:
         self.skill_registry = skill_registry
         self.manual_skills = manual_skills or ManualSkillState()
         self.skill_activator = skill_activator
+        self.recall_service = recall_service
+        self._pending_recall: tuple[RecallEntry, ...] = ()
 
     def run(self) -> int:
         while True:
@@ -103,6 +107,8 @@ class InteractiveShell:
                             return 7
                 elif normalized == "/memory":
                     self._memory(argument)
+                elif normalized == "/recall":
+                    self._recall(argument)
                 elif normalized == "/skills" and not argument:
                     self._skills()
                 elif normalized == "/skill":
@@ -116,7 +122,8 @@ class InteractiveShell:
                 else:
                     self.output(
                         f"[error] unknown command: {command}; "
-                        "use /sessions, /new, /memory, /skills, /jobs, or /exit"
+                        "use /sessions, /new, /memory, /recall, /skills, "
+                        "/jobs, or /exit"
                     )
             except KeyboardInterrupt:
                 return 0
@@ -139,6 +146,7 @@ class InteractiveShell:
             current.workspace, self.session.provider, self.session.model
         )
         self.session.activate(created)
+        self._pending_recall = ()
         self.output(f"[session] created: {created.session_id}")
 
     def _rename(self, name: str) -> None:
@@ -160,6 +168,7 @@ class InteractiveShell:
             )
         self.manual_skills.remove_session(current.session_id)
         self.session.activate(selected)
+        self._pending_recall = ()
         self.output(
             f"[session] deleted {current.session_id}; active: {selected.session_id}"
         )
@@ -181,6 +190,7 @@ class InteractiveShell:
             session_id.strip(), self.session.record.workspace
         )
         self.session.activate(selected)
+        self._pending_recall = ()
         self.output(f"[session] active: {selected.session_id}")
 
     def _read_multiline(self) -> str | None:
@@ -203,7 +213,25 @@ class InteractiveShell:
     def _execute_task(self, task: str, *, capture_candidates: bool) -> None:
         runner = self.session.runner
         set_active = getattr(runner, "set_active_skills", None)
+        set_recall = getattr(runner, "set_recalled_history", None)
         before = len(self.session.history.messages)
+        recall_entries = self._pending_recall
+        self._pending_recall = ()
+        if (
+            not recall_entries
+            and self.recall_service is not None
+            and should_automatic_recall(task)
+        ):
+            try:
+                recall_entries = self.recall_service.search(
+                    self.session.record.workspace,
+                    task,
+                    exclude_session_id=self.session.record.session_id,
+                )
+            except SessionError:
+                recall_entries = ()
+        if callable(set_recall):
+            set_recall(recall_entries)
         if self.skill_activator is not None:
             result = self.skill_activator.prepare(
                 task,
@@ -222,6 +250,26 @@ class InteractiveShell:
         finally:
             if callable(set_active):
                 set_active(())
+            if callable(set_recall):
+                set_recall(())
+
+    def _recall(self, query: str) -> None:
+        if self.recall_service is None:
+            raise SessionError("RECALL_UNAVAILABLE", "session recall is unavailable")
+        entries = self.recall_service.search(
+            self.session.record.workspace,
+            query,
+            exclude_session_id=self.session.record.session_id,
+        )
+        self._pending_recall = entries
+        if not entries:
+            self.output("[recall] no matches")
+            return
+        for item in entries:
+            self.output(
+                f"[recall] {item.session_id} {item.source} "
+                f"#{item.ordinal}: {item.excerpt}"
+            )
 
     def _skills(self) -> None:
         registry = self._require_skill_registry()
@@ -272,7 +320,10 @@ class InteractiveShell:
             if not items:
                 self.output("[memory] empty")
             for item in items:
-                self.output(f"[memory] {item.id}: {item.text}")
+                self.output(
+                    f"[memory] {item.id}: ({item.kind}) "
+                    f"{item.key} = {item.content}"
+                )
             return
         if normalized == "add":
             item = self.memory_store.add(
@@ -290,7 +341,7 @@ class InteractiveShell:
                 "MEMORY_INVALID",
                 "use /memory, /memory add <text>, /memory delete <id>, or /memory clear",
             )
-        self.session.runner.set_workspace_memory(self.memory_store.render(workspace))
+        self._refresh_workspace_memory()
 
     def _capture_candidates(self, turn_messages: tuple[Message, ...]) -> None:
         if self.candidate_extractor is None or self.memory_store is None:
@@ -300,9 +351,12 @@ class InteractiveShell:
             if not is_safe_candidate(candidate, self.session.sensitive_values):
                 continue
             match = self.memory_store.match(
-                self.session.record.workspace, candidate.text, candidate.kind
+                self.session.record.workspace,
+                candidate.content,
+                candidate.kind,
+                key=candidate.key,
             )
-            if match.status == "duplicate":
+            if match.status in {"exact_duplicate", "normalized_duplicate"}:
                 continue
             action = "replace" if match.status == "conflict" else "save"
             try:
@@ -319,25 +373,42 @@ class InteractiveShell:
                     item = self.memory_store.replace(
                         self.session.record.workspace,
                         match.existing.id,
-                        candidate.text,
+                        candidate.content,
                         self.session.sensitive_values,
                         kind=candidate.kind,
                         source="confirmed_candidate",
+                        key=candidate.key,
                     )
                 else:
                     item = self.memory_store.add(
                         self.session.record.workspace,
-                        candidate.text,
+                        candidate.content,
                         self.session.sensitive_values,
                         kind=candidate.kind,
                         source="confirmed_candidate",
+                        key=candidate.key,
                     )
-                self.session.runner.set_workspace_memory(
-                    self.memory_store.render(self.session.record.workspace)
-                )
+                self._refresh_workspace_memory()
                 self.output(f"[memory] added: {item.id}")
             except SessionError as error:
                 self._print_error(error)
+
+    def _refresh_workspace_memory(self) -> None:
+        if self.memory_store is None:
+            return
+        structured_setter = getattr(
+            self.session.runner, "set_workspace_memories", None
+        )
+        if callable(structured_setter):
+            structured_setter(
+                self.memory_store.context_items_for_context(
+                    self.session.record.workspace
+                )
+            )
+            return
+        self.session.runner.set_workspace_memory(
+            self.memory_store.render(self.session.record.workspace)
+        )
 
     def _background(self, task: str) -> None:
         if self.scheduler is None:

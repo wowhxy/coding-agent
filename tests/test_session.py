@@ -103,7 +103,7 @@ def test_session_round_trip_preserves_protocol_fields_and_canonical_json() -> No
         "messages",
         "summary",
     }
-    assert payload["schema_version"] == SESSION_SCHEMA_VERSION == 3
+    assert payload["schema_version"] == SESSION_SCHEMA_VERSION == 4
     assert payload["summary"] is None
     assert payload["created_at"] == "2026-08-27T09:30:00Z"
     assert payload["updated_at"] == "2026-08-27T09:35:00Z"
@@ -167,8 +167,8 @@ def test_redaction_replaces_all_message_string_fields_without_mutating_input() -
     [
         ("{", "SESSION_CORRUPT"),
         ("[]", "SESSION_CORRUPT"),
-        (encode({**valid_document(), "schema_version": 4}), "SESSION_VERSION_UNSUPPORTED"),
-        (encode({**valid_document(), "schema_version": 4.0}), "SESSION_VERSION_UNSUPPORTED"),
+        (encode({**valid_document(), "schema_version": 5}), "SESSION_VERSION_UNSUPPORTED"),
+        (encode({**valid_document(), "schema_version": 5.0}), "SESSION_VERSION_UNSUPPORTED"),
         (encode({**valid_document(), "schema_version": "1"}), "SESSION_CORRUPT"),
     ],
 )
@@ -180,8 +180,8 @@ def test_deserialize_rejects_invalid_document_envelope(text: str, error_code: st
 
 def test_deserialize_classifies_future_numeric_versions_before_v1_field_validation() -> None:
     future_document = {
-        "schema_version": 4,
-        "v4_messages": [],
+        "schema_version": 5,
+        "v5_messages": [],
     }
 
     with pytest.raises(SessionError) as raised:

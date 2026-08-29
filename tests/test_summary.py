@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from coding_agent.agent import AgentRunner
 from coding_agent.context import ContextManager, ConversationHistory
 from coding_agent.model import ModelTransportError
 from coding_agent.protocol import Message, ModelTurn, Role, RunStatus, ToolCall
-from coding_agent.summary import SummaryManager
+from coding_agent.summary import SummaryManager, SummaryState
 from coding_agent.tools.registry import ToolRegistry
 from fakes import FakeModelClient
 
@@ -100,3 +100,23 @@ def test_summary_rejects_non_utc_clock_value_as_best_effort_failure() -> None:
     )
 
     assert manager.prepare(history) is None
+
+
+def test_invalid_runtime_coverage_is_discarded_before_incremental_summary() -> None:
+    history = _history()
+    model = FakeModelClient([ModelTurn("rebuilt summary")])
+    manager = SummaryManager(model, threshold_chars=1, recent_turns=1)
+    invalid = SummaryState(
+        "must not be trusted",
+        99,
+        datetime.now(timezone.utc),
+    )
+
+    state = manager.prepare(history, invalid)
+
+    assert state is not None
+    assert state.schema_version == 1
+    assert state.covered_message_count == 1
+    request = model.calls[0][0][-1].content or ""
+    assert "must not be trusted" not in request
+    assert "Previous summary:\n(none)" in request

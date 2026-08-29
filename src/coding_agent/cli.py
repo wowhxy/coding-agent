@@ -13,12 +13,14 @@ from pathlib import Path
 from .agent import AgentRunner
 from .config import ConfigError, RuntimeConfig, resolve_config
 from .context import ContextManager, ConversationHistory
+from .context_policy import ContextPolicy
 from .interactive import InteractiveSession
 from .interactive_shell import InteractiveShell
 from .model import ModelClient
 from .memory import WorkspaceMemoryStore
 from .memory_candidate import MemoryCandidateExtractor
 from .protocol import AgentEvent, RunResult, RunStatus
+from .recall import RecallService, should_automatic_recall
 from .providers.openai_compatible import OpenAICompatibleClient
 from .session import SessionError, SessionRecord
 from .scheduler import BackgroundRuntime, BackgroundScheduler
@@ -68,6 +70,26 @@ _PROVIDER_PRESETS = {
         "OpenAI",
     ),
 }
+
+
+def _context_policy(config: RuntimeConfig) -> ContextPolicy:
+    return ContextPolicy(
+        max_context_chars=config.max_context_chars,
+        max_tool_output_chars=config.max_tool_output_chars,
+        recent_turns=config.recent_turns,
+        minimum_recent_turns=min(2, config.recent_turns),
+    )
+
+
+def _summary_manager(
+    client: ModelClient, policy: ContextPolicy
+) -> SummaryManager:
+    return SummaryManager(
+        client,
+        threshold_chars=policy.summary_trigger_chars,
+        recent_turns=policy.recent_turns,
+        max_summary_chars=policy.summary_chars,
+    )
 _RESERVED_API_KEY_ENV_NAMES = {
     name.casefold(): name
     for name in (
@@ -319,13 +341,12 @@ def _run_agent(
     print(f"[run] workspace: {config.workspace}")
     print(f"[run] provider: {provider_name}; model: {config.model}")
     try:
-        context_manager = ContextManager(
-            max_context_chars=config.max_context_chars,
-            recent_turns=config.recent_turns,
-            max_tool_output_chars=config.max_tool_output_chars,
-        )
-        context_manager.set_workspace_memory(
-            WorkspaceMemoryStore(memory_root).render_for_context(config.workspace)
+        policy = _context_policy(config)
+        context_manager = ContextManager(policy=policy)
+        context_manager.set_workspace_memories(
+            WorkspaceMemoryStore(memory_root).context_items_for_context(
+                config.workspace
+            )
         )
         skill_registry = SkillRegistry(memory_root, config.workspace)
         skill_registry.discover()
@@ -337,7 +358,7 @@ def _run_agent(
             max_steps=config.max_steps,
             event_sink=_event_sink(config.api_key),
             text_sink=_stream_sink(config.api_key),
-            summary_manager=SummaryManager(client),
+            summary_manager=_summary_manager(client, policy),
         )
         activation = SkillActivator(
             skill_registry, SkillSelector(client)
@@ -383,7 +404,7 @@ def _run_interactive(
             if record.messages
             else ConversationHistory(SYSTEM_PROMPT)
         )
-        memory_text = memory_store.render_for_context(config.workspace)
+        memory_items = memory_store.context_items_for_context(config.workspace)
     except SessionError as error:
         _print_session_error(error, config.api_key)
         return 7
@@ -404,12 +425,9 @@ def _run_interactive(
         print(f"[session] {selection}: {record.session_id}")
         print("[session] enter /exit or press Ctrl+C to save and exit")
 
-        context_manager = ContextManager(
-            max_context_chars=config.max_context_chars,
-            recent_turns=config.recent_turns,
-            max_tool_output_chars=config.max_tool_output_chars,
-        )
-        context_manager.set_workspace_memory(memory_text)
+        policy = _context_policy(config)
+        context_manager = ContextManager(policy=policy)
+        context_manager.set_workspace_memories(memory_items)
         runner = AgentRunner(
             model_client=client,
             registry=build_default_registry(config),
@@ -417,27 +435,26 @@ def _run_interactive(
             max_steps=config.max_steps,
             event_sink=_event_sink(config.api_key),
             text_sink=_stream_sink(config.api_key),
-            summary_manager=SummaryManager(client),
+            summary_manager=_summary_manager(client, policy),
         )
         runner.restore_summary_state(record.summary)
         skill_activator = SkillActivator(skill_registry, SkillSelector(client))
+        recall_service = RecallService(store)
 
         def background_runtime() -> BackgroundRuntime:
-            background_memory = memory_store.render_for_context(config.workspace)
+            background_memory = memory_store.context_items_for_context(
+                config.workspace
+            )
             background_client = client_factory(
                 config.base_url,
                 config.model,
                 config.api_key,
                 config.thinking_mode,
             )
-            background_context = ContextManager(
-                max_context_chars=config.max_context_chars,
-                recent_turns=config.recent_turns,
-                max_tool_output_chars=config.max_tool_output_chars,
-            )
+            background_context = ContextManager(policy=policy)
             close = getattr(background_client, "close", None)
             try:
-                background_context.set_workspace_memory(background_memory)
+                background_context.set_workspace_memories(background_memory)
                 background_runner = AgentRunner(
                     model_client=background_client,
                     registry=build_default_registry(config),
@@ -445,7 +462,7 @@ def _run_interactive(
                     max_steps=config.max_steps,
                     event_sink=None,
                     text_sink=None,
-                    summary_manager=SummaryManager(background_client),
+                    summary_manager=_summary_manager(background_client, policy),
                 )
 
                 def prepare_background_skills(
@@ -455,6 +472,10 @@ def _run_interactive(
                         skill_registry, SkillSelector(background_client)
                     ).prepare(task, manual_names)
                     background_runner.set_active_skills(activation.skills)
+                    if should_automatic_recall(task):
+                        background_runner.set_recalled_history(
+                            recall_service.search(config.workspace, task)
+                        )
                     return activation.diagnostics
 
                 return BackgroundRuntime(
@@ -493,6 +514,7 @@ def _run_interactive(
             candidate_extractor=MemoryCandidateExtractor(client),
             skill_registry=skill_registry,
             skill_activator=skill_activator,
+            recall_service=recall_service,
         )
         return shell.run()
     finally:

@@ -26,6 +26,7 @@ _TRANSIENT_SIGNAL = re.compile(
 _MAX_CANDIDATES = 4
 _MAX_TEXT_CHARS = 500
 _MAX_TRANSCRIPT_CHARS = 20_000
+_MEMORY_KEY = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*")
 _CREDENTIAL_VALUE = re.compile(
     r"\b(?:api[_ -]?key|token|password|secret|credential)\s*[:=]\s*\S+|"
     r"\bbearer\s+[A-Za-z0-9._-]{8,}|\bsk-[A-Za-z0-9]{12,}",
@@ -37,9 +38,14 @@ _CREDENTIAL_VALUE = re.compile(
 class MemoryCandidate:
     """A locally validated fact that still requires explicit user approval."""
 
-    text: str
+    key: str
+    content: str
     kind: str
     source: str
+
+    @property
+    def text(self) -> str:
+        return f"{self.key} = {self.content}"
 
 
 class MemoryCandidateExtractor:
@@ -80,7 +86,7 @@ def is_safe_candidate(
 ) -> bool:
     """Reject obvious credential values and source-code-shaped candidates."""
 
-    text = candidate.text
+    text = candidate.content
     if any(
         type(sensitive) is str and sensitive and sensitive in text
         for sensitive in sensitive_values
@@ -122,7 +128,8 @@ def _request(messages: tuple[Message, ...]) -> tuple[Message, ...]:
         Message(
             Role.SYSTEM,
             "Extract only stable workspace facts worth remembering across sessions. "
-            "Do not call tools. Return strict JSON: {\"candidates\":[{\"text\":str,"
+            "Do not call tools. Return strict JSON: {\"candidates\":[{\"key\":str,"
+            "\"content\":str,"
             "\"kind\":\"command|constraint|convention|architecture|fact\","
             "\"source\":\"user|observed\"}]}. Return at most four items and use "
             "an empty list when nothing is durable.",
@@ -132,18 +139,30 @@ def _request(messages: tuple[Message, ...]) -> tuple[Message, ...]:
 
 
 def _parse_candidate(value: Any) -> MemoryCandidate | None:
-    if type(value) is not dict or set(value) != {"text", "kind", "source"}:
+    if type(value) is not dict or set(value) != {"key", "content", "kind", "source"}:
         return None
-    text, kind, source = value["text"], value["kind"], value["source"]
-    if any(type(field) is not str for field in (text, kind, source)):
+    key, content, kind, source = (
+        value["key"],
+        value["content"],
+        value["kind"],
+        value["source"],
+    )
+    if any(type(field) is not str for field in (key, content, kind, source)):
         return None
-    text = text.strip()
-    if not text or len(text) > _MAX_TEXT_CHARS:
+    key = key.strip()
+    content = content.strip()
+    if (
+        not key
+        or len(key) > 80
+        or _MEMORY_KEY.fullmatch(key) is None
+        or not content
+        or len(content) > _MAX_TEXT_CHARS
+    ):
         return None
     if kind not in _KINDS or source not in _SOURCES:
         return None
-    if _TRANSIENT_SIGNAL.search(text) or "```" in text:
+    if _TRANSIENT_SIGNAL.search(content) or "```" in content:
         return None
-    if "\n" in text and re.search(r"[=(){};]", text):
+    if "\n" in content and re.search(r"[=(){};]", content):
         return None
-    return MemoryCandidate(text, kind, source)
+    return MemoryCandidate(key, content, kind, source)

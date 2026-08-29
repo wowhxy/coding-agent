@@ -13,7 +13,7 @@ from .protocol import Message, Role, ToolCall
 from .summary import SummaryState
 
 
-SESSION_SCHEMA_VERSION = 3
+SESSION_SCHEMA_VERSION = 4
 
 _ROOT_FIELDS = {
     "schema_version",
@@ -94,9 +94,10 @@ def deserialize_session(text: str) -> SessionRecord:
         _corrupt("session schema version is missing")
 
     version = payload["schema_version"]
-    if type(version) in (int, float) and version not in (1, 2, SESSION_SCHEMA_VERSION):
+    supported_versions = (1, 2, 3, SESSION_SCHEMA_VERSION)
+    if type(version) in (int, float) and version not in supported_versions:
         raise SessionError("SESSION_VERSION_UNSUPPORTED", "session schema version is unsupported")
-    if type(version) is not int or version not in (1, 2, SESSION_SCHEMA_VERSION):
+    if type(version) is not int or version not in supported_versions:
         _corrupt("session schema version is invalid")
     expected_fields = (
         _V1_ROOT_FIELDS
@@ -117,8 +118,10 @@ def deserialize_session(text: str) -> SessionRecord:
     updated_at = _parse_timestamp(payload["updated_at"])
     messages = _parse_messages(payload["messages"], allow_empty=version >= 2)
     summary = (
-        _parse_summary_best_effort(payload["summary"], len(messages))
-        if version == SESSION_SCHEMA_VERSION
+        _parse_summary_best_effort(
+            payload["summary"], len(messages), legacy=version == 3
+        )
+        if version >= 3
         else None
     )
 
@@ -182,7 +185,12 @@ def redact_summary(
     for sensitive in sensitive_values:
         if type(sensitive) is str and sensitive:
             text = text.replace(sensitive, "[REDACTED]")
-    return SummaryState(text, summary.covered_message_count, summary.updated_at)
+    return SummaryState(
+        text,
+        summary.covered_message_count,
+        summary.updated_at,
+        summary.schema_version,
+    )
 
 
 def _validate_record(record: SessionRecord) -> None:
@@ -205,6 +213,7 @@ def _summary_to_payload(summary: SummaryState | None) -> dict[str, Any] | None:
     if summary is None:
         return None
     return {
+        "schema_version": summary.schema_version,
         "text": summary.text,
         "covered_message_count": summary.covered_message_count,
         "updated_at": _format_timestamp(summary.updated_at),
@@ -214,6 +223,8 @@ def _summary_to_payload(summary: SummaryState | None) -> dict[str, Any] | None:
 def _validate_summary(summary: Any, message_count: int) -> None:
     if not isinstance(summary, SummaryState):
         _corrupt("session summary is invalid")
+    if summary.schema_version != 1:
+        _corrupt("session summary schema is invalid")
     if type(summary.text) is not str or not summary.text.strip():
         _corrupt("session summary text is invalid")
     maximum = max(0, message_count - 1)
@@ -226,17 +237,23 @@ def _validate_summary(summary: Any, message_count: int) -> None:
     _format_timestamp(summary.updated_at)
 
 
-def _parse_summary_best_effort(value: Any, message_count: int) -> SummaryState | None:
+def _parse_summary_best_effort(
+    value: Any, message_count: int, *, legacy: bool = False
+) -> SummaryState | None:
     """Recover canonical history even when optional derived summary is invalid."""
 
     if value is None:
         return None
     try:
-        _require_fields(value, {"text", "covered_message_count", "updated_at"})
+        fields = {"text", "covered_message_count", "updated_at"}
+        if not legacy:
+            fields.add("schema_version")
+        _require_fields(value, fields)
         summary = SummaryState(
             text=value["text"],
             covered_message_count=value["covered_message_count"],
             updated_at=_parse_timestamp(value["updated_at"]),
+            schema_version=1 if legacy else value["schema_version"],
         )
         _validate_summary(summary, message_count)
         return summary

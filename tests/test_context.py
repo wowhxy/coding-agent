@@ -238,7 +238,7 @@ def test_context_limits_must_be_positive(keyword: str, values: dict[str, int]) -
         ContextManager(**values)
 
 
-def test_budget_drops_summary_then_memory_before_older_recent_turns() -> None:
+def test_budget_drops_memory_then_old_turns_before_persistent_summary() -> None:
     history = ConversationHistory("system", "original task")
     history.append(Message(Role.ASSISTANT, "initial answer"))
     history.append(Message(Role.USER, "older request"))
@@ -256,10 +256,10 @@ def test_budget_drops_summary_then_memory_before_older_recent_turns() -> None:
     messages = manager.build(history, summary=summary)
     contents = [message.content or "" for message in messages]
 
-    assert any("Workspace memory" in content for content in contents)
-    assert all("Conversation summary" not in content for content in contents)
-    assert "older request" in contents
-    assert "O" * 500 in contents
+    assert all("Workspace memory" not in content for content in contents)
+    assert any("Conversation summary" in content for content in contents)
+    assert "older request" not in contents
+    assert "O" * 500 not in contents
     assert contents[-2:] == ["latest request", "latest answer"]
 
 

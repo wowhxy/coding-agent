@@ -121,9 +121,10 @@ def test_memory_summary_restart_new_session_and_workspace_isolation_offline(
         candidate_extractor=MemoryCandidateExtractor(
             FakeModelClient(
                 [
-                    ModelTurn(
-                        '{"candidates":[{"text":"Build command: cmake --build build",'
-                        '"kind":"command","source":"observed"}]}'
+                        ModelTurn(
+                            '{"candidates":[{"key":"build.command",'
+                            '"content":"cmake --build build",'
+                            '"kind":"command","source":"observed"}]}'
                     )
                 ]
             )
@@ -155,7 +156,10 @@ def test_memory_summary_restart_new_session_and_workspace_isolation_offline(
     )
     resumed.execute("continue after restart")
     resumed_context = resumed_model.calls[0][0]
-    assert any("Build command: cmake" in (message.content or "") for message in resumed_context)
+    assert any(
+        "build.command = cmake --build build" in (message.content or "")
+        for message in resumed_context
+    )
     assert any("persistent old-work summary" in (message.content or "") for message in resumed_context)
 
     second = sessions.create_session(workspace, "fake", "fake-model")
@@ -172,7 +176,10 @@ def test_memory_summary_restart_new_session_and_workspace_isolation_offline(
         (),
     ).execute("new session task")
     second_context = second_model.calls[0][0]
-    assert any("Build command: cmake" in (message.content or "") for message in second_context)
+    assert any(
+        "build.command = cmake --build build" in (message.content or "")
+        for message in second_context
+    )
     assert all("persistent old-work summary" not in (message.content or "") for message in second_context)
     assert all("inspect main.cpp" not in (message.content or "") for message in second_context)
 

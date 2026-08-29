@@ -7,14 +7,14 @@ coding-agent --provider deepseek "<任务>"
 
 交互：
 python -m coding_agent --provider deepseek
-默认交互启动恢复当前 workspace 的最近 session；--new-session 新建，--resume-session <ID> 恢复。/exit 或输入阶段 Ctrl+C 正常退出；运行阶段 Ctrl+C 丢弃未完成当前轮次；无已提交轮次的新会话不留下 session 文件。
+默认交互启动恢复当前 workspace 的最近 session。--new-session；--resume-session <ID>。/exit 或输入阶段 Ctrl+C 正常退出；运行阶段 Ctrl+C 丢弃未完成当前轮次；无已提交轮次的新会话不留下 session 文件。
+命令：/new、/sessions、/use、/recall <query>、/multiline、/memory、/background、/jobs。
 
-命令：/new、/sessions、/use、/multiline、/memory、/background、/jobs。
+Context/Memory：模型视图渐进压缩并持久化增量摘要。长期知识确认后才保存，支持去重、冲突更新、相关选择和 workspace 隔离；Recall 临时生效。
 
-Skill：读取 CODING_AGENT_HOME/skills 与 .coding-agent/skills（workspace 同名优先）的 SKILL.md。/skills 查看；/skill use、/skill off、/skill clear 手动启停（仅当前进程）；automatic 每任务最多一次，且从属核心安全规则。
+Skill：从两级 skills 目录读取 SKILL.md。/skills；/skill use；automatic 每任务至多一次且从属核心规则。
 
-无 DEEPSEEK_API_KEY 时隐藏询问 API Key；DeepSeek 默认 --thinking-mode disabled。OpenAI 使用 OPENAI_API_KEY、--provider openai --model <模型>。
+API Key：缺少 DEEPSEEK_API_KEY 时隐藏询问；默认 --thinking-mode disabled。OpenAI 使用 OPENAI_API_KEY、--provider openai --model <模型>。
 
-特色：同步 Agent Loop、六个本地工具、会话摘要、workspace memory、Skill、后台任务、离线测试。FINAL_RESPONSE 和持久化成功都不证明任务语义正确，仍需测试证据。
-
-安全：密钥不入库。execute_command 不是完整 OS sandbox。本地 session JSON 是明文，可能包含任务、源码和工具输出；不要粘贴秘密。后台取消仅在步骤边界生效，不保证强杀 descendant process。
+特色：自实现 Agent Loop、六个工具、Provider 抽象、持久会话、离线测试。FINAL_RESPONSE 和持久化成功都不证明任务语义正确。
+安全：密钥不入库；execute_command 不是完整 OS sandbox。本地 session JSON 是明文，可能包含任务、源码和工具输出；不要粘贴秘密。不保证终止全部 descendant process。

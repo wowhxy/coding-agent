@@ -17,6 +17,8 @@ from .protocol import (
 from .tools.registry import ToolRegistry
 from .summary import SummaryManager, SummaryState
 from .skills import ActiveSkill
+from .memory_retrieval import ContextMemory
+from .recall import RecallEntry
 
 
 EventSink = Callable[[AgentEvent], None]
@@ -70,6 +72,7 @@ class AgentRunner:
                 )
             last_failure: FailureFingerprint | None = None
             consecutive_failures = 0
+            summary_updated_this_turn = False
 
             for step in range(1, self.max_steps + 1):
                 if cancel_check is not None and cancel_check():
@@ -77,14 +80,26 @@ class AgentRunner:
                         RunStatus.CANCELLED, None, step - 1, "run cancelled"
                     )
                 if self.summary_manager is not None:
+                    previous_summary = self._summary_state
                     self._summary_state = self.summary_manager.prepare(
-                        history, self._summary_state
+                        history,
+                        previous_summary,
+                        force=self.context_manager.needs_summary(
+                            history, previous_summary
+                        ),
                     )
-                messages = (
-                    self.context_manager.build(history, summary=self._summary_state)
-                    if self._summary_state is not None
-                    else self.context_manager.build(history)
-                )
+                    summary_updated_this_turn = (
+                        summary_updated_this_turn
+                        or self._summary_state != previous_summary
+                    )
+                if self.summary_manager is None and self._summary_state is None:
+                    messages = self.context_manager.build(history)
+                else:
+                    messages = self.context_manager.build(
+                        history,
+                        summary=self._summary_state,
+                        summary_updated=summary_updated_this_turn,
+                    )
                 definitions = self.registry.definitions()
                 streaming_complete = getattr(
                     self.model_client, "complete_streaming", None
@@ -110,7 +125,6 @@ class AgentRunner:
                             )
                         self._emit("tool_requested", step, call.name)
                         result = self.registry.dispatch(call)
-                        result = self.context_manager.prepare_tool_result(result)
                         history.append(
                             Message(
                                 Role.TOOL,
@@ -208,6 +222,16 @@ class AgentRunner:
         """Update the explicit workspace memory used for future model requests."""
 
         self.context_manager.set_workspace_memory(text)
+
+    def set_workspace_memories(self, items: tuple[ContextMemory, ...]) -> None:
+        """Update structured workspace knowledge used for future requests."""
+
+        self.context_manager.set_workspace_memories(items)
+
+    def set_recalled_history(self, entries: tuple[RecallEntry, ...]) -> None:
+        """Set temporary historical evidence for one model-facing turn."""
+
+        self.context_manager.set_recalled_history(entries)
 
     def set_active_skills(self, skills: tuple[ActiveSkill, ...]) -> None:
         """Update transient Skill guidance used for future model requests."""

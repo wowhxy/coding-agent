@@ -241,7 +241,7 @@ def test_shell_memory_commands_update_future_agent_context(tmp_path: Path) -> No
     assert any("11111111" in line for line in output)
 
 
-def test_v1_memory_migrates_in_memory_and_next_write_persists_v2_metadata(
+def test_v1_memory_migrates_in_memory_and_next_write_persists_v3_metadata(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -271,13 +271,22 @@ def test_v1_memory_migrates_in_memory_and_next_write_persists_v2_metadata(
     persisted = json.loads(path.read_text(encoding="utf-8"))
 
     assert migrated == (
-        MemoryItem("11111111", "Use pytest", NOW, "fact", "user", NOW),
+        MemoryItem(
+            "11111111",
+            "fact",
+            "fact.note.3d825a05",
+            "Use pytest",
+            "user",
+            NOW,
+            NOW,
+        ),
     )
-    assert persisted["schema_version"] == 2
+    assert persisted["schema_version"] == 3
     assert persisted["items"][0] == {
         "id": "11111111",
-        "text": "Use pytest",
         "kind": "fact",
+        "key": "fact.note.3d825a05",
+        "content": "Use pytest",
         "source": "user",
         "created_at": "2026-08-28T10:00:00Z",
         "updated_at": "2026-08-28T10:00:00Z",
@@ -303,7 +312,7 @@ def test_memory_classifies_normalized_duplicate_and_explicit_topic_conflict(
     conflict = store.match(workspace, "Test runner: unittest", "command")
     fresh = store.match(workspace, "Python version: 3.11", "architecture")
 
-    assert duplicate == MemoryMatch("duplicate", original)
+    assert duplicate == MemoryMatch("normalized_duplicate", original)
     assert conflict == MemoryMatch("conflict", original)
     assert fresh == MemoryMatch("new", None)
 
@@ -348,17 +357,21 @@ def test_confirmed_conflict_replace_preserves_identity_and_creation_time(
     ),
 )
 def test_candidate_safety_rejects_credentials_and_source_dumps(text: str) -> None:
-    candidate = MemoryCandidate(text, "fact", "observed")
+    candidate = MemoryCandidate("project.fact", text, "fact", "observed")
 
     assert is_safe_candidate(candidate, ("current-live-key",)) is False
 
 
 def test_candidate_safety_rejects_current_key_but_allows_security_policy() -> None:
     assert is_safe_candidate(
-        MemoryCandidate("provider key is current-live-key", "fact", "observed"),
+        MemoryCandidate(
+            "provider.policy", "provider key is current-live-key", "fact", "observed"
+        ),
         ("current-live-key",),
     ) is False
     assert is_safe_candidate(
-        MemoryCandidate("Never commit API keys", "constraint", "user"),
+        MemoryCandidate(
+            "constraint.credentials", "Never commit API keys", "constraint", "user"
+        ),
         ("current-live-key",),
     ) is True
