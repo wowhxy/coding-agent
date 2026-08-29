@@ -23,6 +23,8 @@ from .recall import RecallEntry
 
 EventSink = Callable[[AgentEvent], None]
 TextSink = Callable[[str], None]
+RunStartHook = Callable[[], None]
+ContextSnapshotSink = Callable[[tuple[Message, ...]], None]
 FailureFingerprint = tuple[str, str, str | None, str | None, str]
 
 
@@ -38,6 +40,8 @@ class AgentRunner:
         event_sink: EventSink | None = None,
         text_sink: TextSink | None = None,
         summary_manager: SummaryManager | None = None,
+        run_start_hook: RunStartHook | None = None,
+        context_snapshot_sink: ContextSnapshotSink | None = None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be positive")
@@ -48,6 +52,8 @@ class AgentRunner:
         self.event_sink = event_sink
         self.text_sink = text_sink
         self.summary_manager = summary_manager
+        self.run_start_hook = run_start_hook
+        self.context_snapshot_sink = context_snapshot_sink
         self._summary_state: SummaryState | None = None
 
     def run(self, system_prompt: str, original_user_task: str) -> RunResult:
@@ -65,6 +71,8 @@ class AgentRunner:
 
         step = 0
         try:
+            if self.run_start_hook is not None:
+                self.run_start_hook()
             history.append(Message(Role.USER, user_message))
             if cancel_check is not None and cancel_check():
                 return self._finish(
@@ -100,6 +108,8 @@ class AgentRunner:
                         summary=self._summary_state,
                         summary_updated=summary_updated_this_turn,
                     )
+                if self.context_snapshot_sink is not None:
+                    self.context_snapshot_sink(tuple(messages))
                 definitions = self.registry.definitions()
                 streaming_complete = getattr(
                     self.model_client, "complete_streaming", None

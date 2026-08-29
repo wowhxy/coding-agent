@@ -721,6 +721,7 @@ def test_main_passes_context_and_tool_definitions_to_fake_model(
         "write_file",
         "replace_in_file",
         "execute_command",
+        "delegate_tasks",
     ]
 
 
@@ -778,6 +779,7 @@ def test_interactive_default_creates_turns_and_closes_one_reused_client(
             "write_file",
             "replace_in_file",
             "execute_command",
+            "delegate_tasks",
         ]
         for _messages, definitions in client.calls
     )

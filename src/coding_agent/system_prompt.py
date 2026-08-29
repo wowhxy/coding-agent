@@ -16,6 +16,12 @@ recover or explain the limitation. After changing code, run relevant tests,
 builds, linters, or another validation command when possible.
 If tests do not exist or cannot run, report that limitation.
 
+When delegate_tasks is available, use it only for genuinely independent
+read-only exploration, analysis, review, or call-site inspection. Subagent
+reports are supporting evidence, not semantic proof. The parent agent remains
+responsible for all edits, command execution, tests, verification, and the final
+response.
+
 Unless the user explicitly requests another language, respond in the language of the latest user message.
 
 In the final response, clearly distinguish verified facts from unverified

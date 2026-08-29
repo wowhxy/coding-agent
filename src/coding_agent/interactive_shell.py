@@ -15,6 +15,7 @@ from .scheduler import BackgroundScheduler
 from .session_store import JsonSessionStore, SessionSummary
 from .skill_selector import SkillActivator
 from .skills import ManualSkillState, SkillError, SkillRegistry
+from .subagents.manager import SubagentManager
 
 
 class InteractiveShell:
@@ -34,6 +35,7 @@ class InteractiveShell:
         skill_activator: SkillActivator | None = None,
         recall_service: RecallService | None = None,
         plugin_manager: PluginManager | None = None,
+        subagent_manager: SubagentManager | None = None,
     ) -> None:
         self.session = session
         self.store = store
@@ -47,6 +49,7 @@ class InteractiveShell:
         self.skill_activator = skill_activator
         self.recall_service = recall_service
         self.plugin_manager = plugin_manager
+        self.subagent_manager = subagent_manager
         self._pending_recall: tuple[RecallEntry, ...] = ()
 
     def run(self) -> int:
@@ -295,6 +298,8 @@ class InteractiveShell:
             )
             if callable(set_active):
                 set_active(result.skills)
+            if self.subagent_manager is not None:
+                self.subagent_manager.set_active_skills(result.skills)
             for diagnostic in result.diagnostics:
                 self.output(
                     f"[skill warning] {diagnostic.code}: {diagnostic.message}"
@@ -306,6 +311,8 @@ class InteractiveShell:
         finally:
             if callable(set_active):
                 set_active(())
+            if self.subagent_manager is not None:
+                self.subagent_manager.set_active_skills(())
             if callable(set_recall):
                 set_recall(())
 
@@ -452,19 +459,20 @@ class InteractiveShell:
     def _refresh_workspace_memory(self) -> None:
         if self.memory_store is None:
             return
+        items = self.memory_store.context_items_for_context(
+            self.session.record.workspace
+        )
         structured_setter = getattr(
             self.session.runner, "set_workspace_memories", None
         )
         if callable(structured_setter):
-            structured_setter(
-                self.memory_store.context_items_for_context(
-                    self.session.record.workspace
-                )
+            structured_setter(items)
+        else:
+            self.session.runner.set_workspace_memory(
+                self.memory_store.render(self.session.record.workspace)
             )
-            return
-        self.session.runner.set_workspace_memory(
-            self.memory_store.render(self.session.record.workspace)
-        )
+        if self.subagent_manager is not None:
+            self.subagent_manager.set_workspace_memories(items)
 
     def _background(self, task: str) -> None:
         if self.scheduler is None:

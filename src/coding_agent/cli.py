@@ -29,6 +29,9 @@ from .session_store import JsonSessionStore, resolve_session_home
 from .skill_selector import SkillActivator, SkillSelector
 from .skills import SkillDiagnostic, SkillRegistry
 from .summary import SummaryManager
+from .subagents.control import create_delegate_tasks_tool
+from .subagents.manager import SubagentManager
+from .subagents.models import SubagentEvent
 from .system_prompt import SYSTEM_PROMPT
 from .tools import build_default_registry
 
@@ -91,6 +94,31 @@ def _summary_manager(
         recent_turns=policy.recent_turns,
         max_summary_chars=policy.summary_chars,
     )
+
+
+def _subagent_manager(
+    config: RuntimeConfig,
+    client_factory: ClientFactory,
+    policy: ContextPolicy,
+    *,
+    event_sink: Callable[[SubagentEvent], None] | None,
+) -> SubagentManager:
+    """Compose a lazy child factory without sharing the parent client."""
+
+    return SubagentManager(
+        config.workspace,
+        lambda: client_factory(
+            config.base_url,
+            config.model,
+            config.api_key,
+            config.thinking_mode,
+        ),
+        lambda: ContextManager(policy=policy),
+        sensitive_values=(config.api_key,),
+        event_sink=event_sink,
+    )
+
+
 _RESERVED_API_KEY_ENV_NAMES = {
     name.casefold(): name
     for name in (
@@ -345,15 +373,25 @@ def _run_agent(
     try:
         policy = _context_policy(config)
         context_manager = ContextManager(policy=policy)
-        context_manager.set_workspace_memories(
-            WorkspaceMemoryStore(memory_root).context_items_for_context(
-                config.workspace
-            )
+        memory_items = WorkspaceMemoryStore(
+            memory_root
+        ).context_items_for_context(config.workspace)
+        context_manager.set_workspace_memories(memory_items)
+        subagent_manager = _subagent_manager(
+            config,
+            client_factory,
+            policy,
+            event_sink=_subagent_event_sink(config.api_key),
         )
+        subagent_manager.set_workspace_memories(memory_items)
         skill_registry = SkillRegistry(memory_root, config.workspace)
         skill_registry.discover()
         _print_skill_diagnostics(skill_registry.diagnostics, config.api_key)
         registry = build_default_registry(config)
+        registry.register_many(
+            (create_delegate_tasks_tool(subagent_manager),),
+            source="control:subagent",
+        )
         plugin_manager = PluginManager(memory_root, config.workspace, registry)
         plugin_manager.restore_enabled()
         _print_plugin_diagnostics(plugin_manager.diagnostics, config.api_key)
@@ -365,11 +403,14 @@ def _run_agent(
             event_sink=_event_sink(config.api_key),
             text_sink=_stream_sink(config.api_key),
             summary_manager=_summary_manager(client, policy),
+            run_start_hook=subagent_manager.begin_parent_run,
+            context_snapshot_sink=subagent_manager.observe_parent_context,
         )
         activation = SkillActivator(
             skill_registry, SkillSelector(client)
         ).prepare(task)
         runner.set_active_skills(activation.skills)
+        subagent_manager.set_active_skills(activation.skills)
         _print_skill_diagnostics(activation.diagnostics, config.api_key)
         return runner.run(SYSTEM_PROMPT, task)
     finally:
@@ -437,7 +478,18 @@ def _run_interactive(
         policy = _context_policy(config)
         context_manager = ContextManager(policy=policy)
         context_manager.set_workspace_memories(memory_items)
+        subagent_manager = _subagent_manager(
+            config,
+            client_factory,
+            policy,
+            event_sink=_subagent_event_sink(config.api_key),
+        )
+        subagent_manager.set_workspace_memories(memory_items)
         registry = build_default_registry(config)
+        registry.register_many(
+            (create_delegate_tasks_tool(subagent_manager),),
+            source="control:subagent",
+        )
         plugin_manager = PluginManager(
             session_home, config.workspace, registry
         )
@@ -452,6 +504,8 @@ def _run_interactive(
             event_sink=_event_sink(config.api_key),
             text_sink=_stream_sink(config.api_key),
             summary_manager=_summary_manager(client, policy),
+            run_start_hook=subagent_manager.begin_parent_run,
+            context_snapshot_sink=subagent_manager.observe_parent_context,
         )
         runner.restore_summary_state(record.summary)
         skill_activator = SkillActivator(skill_registry, SkillSelector(client))
@@ -474,7 +528,18 @@ def _run_interactive(
             background_plugins: PluginManager | None = None
             try:
                 background_context.set_workspace_memories(background_memory)
+                background_subagents = _subagent_manager(
+                    config,
+                    client_factory,
+                    policy,
+                    event_sink=None,
+                )
+                background_subagents.set_workspace_memories(background_memory)
                 background_registry = build_default_registry(config)
+                background_registry.register_many(
+                    (create_delegate_tasks_tool(background_subagents),),
+                    source="control:subagent",
+                )
                 background_plugins = PluginManager(
                     session_home, config.workspace, background_registry
                 )
@@ -490,6 +555,10 @@ def _run_interactive(
                     event_sink=None,
                     text_sink=None,
                     summary_manager=_summary_manager(background_client, policy),
+                    run_start_hook=background_subagents.begin_parent_run,
+                    context_snapshot_sink=(
+                        background_subagents.observe_parent_context
+                    ),
                 )
 
                 def prepare_background_skills(
@@ -499,6 +568,7 @@ def _run_interactive(
                         skill_registry, SkillSelector(background_client)
                     ).prepare(task, manual_names)
                     background_runner.set_active_skills(activation.skills)
+                    background_subagents.set_active_skills(activation.skills)
                     if should_automatic_recall(task):
                         background_runner.set_recalled_history(
                             recall_service.search(config.workspace, task)
@@ -551,6 +621,7 @@ def _run_interactive(
             skill_activator=skill_activator,
             recall_service=recall_service,
             plugin_manager=plugin_manager,
+            subagent_manager=subagent_manager,
         )
         return shell.run()
     finally:
@@ -654,6 +725,22 @@ def _event_sink(api_key: str) -> Callable[[AgentEvent], None]:
             print(f"[step {event.step}] model requested: {message}")
         elif event.kind == "tool_result":
             print(f"[tool] {message}")
+
+    return emit
+
+
+def _subagent_event_sink(api_key: str) -> Callable[[SubagentEvent], None]:
+    def emit(event: SubagentEvent) -> None:
+        if event.kind == "batch_started":
+            print(f"[subagents] batch started: {_redact(event.message, api_key)}")
+        elif event.kind == "task_started":
+            assert event.task_id is not None and event.role is not None
+            print(f"[subagent {event.task_id}] running: {event.role.value}")
+        elif event.kind == "task_completed":
+            assert event.task_id is not None and event.status is not None
+            print(f"[subagent {event.task_id}] completed: {event.status.value}")
+        elif event.kind == "batch_collected":
+            print(f"[subagents] collected: {_redact(event.message, api_key)}")
 
     return emit
 

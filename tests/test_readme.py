@@ -46,6 +46,10 @@ def test_submission_readme_constraints() -> None:
     assert "/plugin enable" in text
     assert "/plugin disable" in text
     assert "不是安全沙箱" in text
+    assert "Subagent" in text
+    assert "delegate_tasks" in text
+    assert "单进程" in text
+    assert "单写者" in text
     lines = text.splitlines()
     assert lines[1].startswith("Git 仓库：")
     repository_url = lines[1].removeprefix("Git 仓库：")
@@ -65,6 +69,20 @@ def test_plugin_demo_documents_trust_lifecycle_and_constrained_value() -> None:
     assert "shell=False" in text
     assert "execute_command" in text
     assert "cleanup" in text.lower()
+
+
+def test_subagent_demo_documents_parallel_single_writer_flow() -> None:
+    text = Path("docs/subagent-demo.md").read_text(encoding="utf-8")
+
+    assert "PowerShell" in text
+    assert "delegate_tasks" in text
+    assert "three" in text.casefold()
+    assert "single process" in text.casefold()
+    assert "single writer" in text.casefold()
+    assert "read-only" in text.casefold()
+    assert "DEEPSEEK_API_KEY" in text
+    assert "[subagents] batch started: 3" in text
+    assert "pytest" in text
 
 
 def test_submission_sources_contain_no_credential_like_values() -> None:
