@@ -502,7 +502,7 @@ def test_session_codec_errors_are_preserved_by_explicit_load(tmp_path: Path) -> 
     assert_error("SESSION_CORRUPT", lambda: store.load_session("111111111111", workspace))
 
     (sessions / "222222222222.json").write_text(
-            json.dumps({"schema_version": 3, "future": True}), encoding="utf-8"
+            json.dumps({"schema_version": 4, "future": True}), encoding="utf-8"
     )
     assert_error("SESSION_VERSION_UNSUPPORTED", lambda: store.load_session("222222222222", workspace))
 

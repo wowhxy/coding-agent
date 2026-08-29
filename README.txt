@@ -16,3 +16,4 @@ python -m coding_agent --provider deepseek
 特色：同步 Agent Loop、六个本地工具、流式输出、摘要、workspace memory、双后台线程、离线测试。FINAL_RESPONSE 和持久化成功都不证明任务语义正确，仍需测试证据。
 
 安全：密钥不入库，memory 过滤当前 key。execute_command 不是完整 OS sandbox。本地 session JSON 是明文，memory 亦然，可能包含任务、源码和工具输出；不要粘贴秘密。后台取消仅在步骤边界生效，不保证强杀阻塞调用/descendant process，无跨进程锁。
+记忆候选需确认

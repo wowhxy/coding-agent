@@ -6,6 +6,8 @@ from collections.abc import Callable
 
 from .interactive import InteractiveSession, _redact_text
 from .memory import WorkspaceMemoryStore
+from .memory_candidate import MemoryCandidateExtractor, is_safe_candidate
+from .protocol import Message, RunStatus
 from .session import SessionError
 from .scheduler import BackgroundScheduler
 from .session_store import JsonSessionStore, SessionSummary
@@ -22,6 +24,7 @@ class InteractiveShell:
         output: Callable[[str], None] = print,
         memory_store: WorkspaceMemoryStore | None = None,
         scheduler: BackgroundScheduler | None = None,
+        candidate_extractor: MemoryCandidateExtractor | None = None,
     ) -> None:
         self.session = session
         self.store = store
@@ -29,6 +32,7 @@ class InteractiveShell:
         self.output = output
         self.memory_store = memory_store
         self.scheduler = scheduler
+        self.candidate_extractor = candidate_extractor
 
     def run(self) -> int:
         while True:
@@ -56,7 +60,12 @@ class InteractiveShell:
                         continue
                     self._refresh_active_session()
                 try:
-                    self.session.execute(raw)
+                    before = len(self.session.history.messages)
+                    result = self.session.execute(raw)
+                    if result.status is RunStatus.FINAL_RESPONSE:
+                        self._capture_candidates(
+                            self.session.history.messages[before:]
+                        )
                 except KeyboardInterrupt:
                     return 0
                 except SessionError as error:
@@ -207,6 +216,53 @@ class InteractiveShell:
                 "use /memory, /memory add <text>, /memory delete <id>, or /memory clear",
             )
         self.session.runner.set_workspace_memory(self.memory_store.render(workspace))
+
+    def _capture_candidates(self, turn_messages: tuple[Message, ...]) -> None:
+        if self.candidate_extractor is None or self.memory_store is None:
+            return
+        candidates = self.candidate_extractor.extract(turn_messages)
+        for candidate in candidates:
+            if not is_safe_candidate(candidate, self.session.sensitive_values):
+                continue
+            match = self.memory_store.match(
+                self.session.record.workspace, candidate.text, candidate.kind
+            )
+            if match.status == "duplicate":
+                continue
+            action = "replace" if match.status == "conflict" else "save"
+            try:
+                answer = self.input_reader(
+                    f"[memory candidate] {action} ({candidate.kind}) "
+                    f"{candidate.text} [y/N] "
+                )
+            except EOFError:
+                return
+            if answer.strip().casefold() != "y":
+                continue
+            try:
+                if match.status == "conflict" and match.existing is not None:
+                    item = self.memory_store.replace(
+                        self.session.record.workspace,
+                        match.existing.id,
+                        candidate.text,
+                        self.session.sensitive_values,
+                        kind=candidate.kind,
+                        source="confirmed_candidate",
+                    )
+                else:
+                    item = self.memory_store.add(
+                        self.session.record.workspace,
+                        candidate.text,
+                        self.session.sensitive_values,
+                        kind=candidate.kind,
+                        source="confirmed_candidate",
+                    )
+                self.session.runner.set_workspace_memory(
+                    self.memory_store.render(self.session.record.workspace)
+                )
+                self.output(f"[memory] added: {item.id}")
+            except SessionError as error:
+                self._print_error(error)
 
     def _background(self, task: str) -> None:
         if self.scheduler is None:

@@ -17,6 +17,7 @@ from .interactive import InteractiveSession
 from .interactive_shell import InteractiveShell
 from .model import ModelClient
 from .memory import WorkspaceMemoryStore
+from .memory_candidate import MemoryCandidateExtractor
 from .protocol import AgentEvent, RunResult, RunStatus
 from .providers.openai_compatible import OpenAICompatibleClient
 from .session import SessionError, SessionRecord
@@ -322,7 +323,7 @@ def _run_agent(
             max_tool_output_chars=config.max_tool_output_chars,
         )
         context_manager.set_workspace_memory(
-            WorkspaceMemoryStore(memory_root).render(config.workspace)
+            WorkspaceMemoryStore(memory_root).render_for_context(config.workspace)
         )
         runner = AgentRunner(
             model_client=client,
@@ -373,7 +374,7 @@ def _run_interactive(
             if record.messages
             else ConversationHistory(SYSTEM_PROMPT)
         )
-        memory_text = memory_store.render(config.workspace)
+        memory_text = memory_store.render_for_context(config.workspace)
     except SessionError as error:
         _print_session_error(error, config.api_key)
         return 7
@@ -408,9 +409,10 @@ def _run_interactive(
             text_sink=_stream_sink(config.api_key),
             summary_manager=SummaryManager(client),
         )
+        runner.restore_summary_state(record.summary)
 
         def background_runtime() -> BackgroundRuntime:
-            background_memory = memory_store.render(config.workspace)
+            background_memory = memory_store.render_for_context(config.workspace)
             background_client = client_factory(
                 config.base_url,
                 config.model,
@@ -466,6 +468,7 @@ def _run_interactive(
             output=lambda message: print(message, file=sys.stderr),
             memory_store=memory_store,
             scheduler=scheduler,
+            candidate_extractor=MemoryCandidateExtractor(client),
         )
         return shell.run()
     finally:

@@ -14,7 +14,7 @@ from pathlib import Path
 from .agent import AgentRunner
 from .context import ConversationHistory
 from .protocol import RunResult, RunStatus
-from .session import SessionError, SessionRecord, redact_messages
+from .session import SessionError, SessionRecord, redact_messages, redact_summary
 from .session_store import JsonSessionStore
 from .system_prompt import SYSTEM_PROMPT
 
@@ -193,6 +193,9 @@ class BackgroundScheduler:
                 else ConversationHistory(SYSTEM_PROMPT)
             )
             runtime = self.runtime_factory()
+            restore_summary = getattr(runtime.runner, "restore_summary_state", None)
+            if callable(restore_summary):
+                restore_summary(record.summary)
             result = runtime.runner.run_turn(
                 history,
                 state.snapshot.task,
@@ -203,6 +206,10 @@ class BackgroundScheduler:
                     record,
                     messages=redact_messages(
                         history.persisted_messages, state.sensitive_values
+                    ),
+                    summary=redact_summary(
+                        getattr(runtime.runner, "summary_state", record.summary),
+                        state.sensitive_values,
                     ),
                 )
                 self.store.save(persisted)

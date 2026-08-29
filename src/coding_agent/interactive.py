@@ -9,7 +9,7 @@ from typing import Protocol
 from .agent import AgentRunner
 from .context import ConversationHistory
 from .protocol import RunResult, RunStatus
-from .session import SessionError, SessionRecord, redact_messages
+from .session import SessionError, SessionRecord, redact_messages, redact_summary
 
 
 class SessionStore(Protocol):
@@ -88,9 +88,15 @@ class InteractiveSession:
         """Run one transactional turn and persist committable outcomes."""
 
         working = self.history.copy()
-        result = self.runner.run_turn(working, text)
-        self.result_sink(result)
+        previous_summary = getattr(self.runner, "summary_state", None)
+        try:
+            result = self.runner.run_turn(working, text)
+            self.result_sink(result)
+        except BaseException:
+            self._restore_summary(previous_summary)
+            raise
         if result.status not in _COMMIT_STATUSES:
+            self._restore_summary(previous_summary)
             return result
 
         persisted = replace(
@@ -98,11 +104,24 @@ class InteractiveSession:
             provider=self.provider,
             model=self.model,
             messages=redact_messages(working.persisted_messages, self.sensitive_values),
+            summary=redact_summary(
+                getattr(self.runner, "summary_state", self.record.summary),
+                self.sensitive_values,
+            ),
         )
-        saved = self.store.save(persisted)
+        try:
+            saved = self.store.save(persisted)
+        except BaseException:
+            self._restore_summary(previous_summary)
+            raise
         self.record = saved
         self.history = working
         return result
+
+    def _restore_summary(self, state: object) -> None:
+        restore = getattr(self.runner, "restore_summary_state", None)
+        if callable(restore):
+            restore(state)
 
     def activate(self, record: SessionRecord) -> None:
         """Switch this transactional runner to another session record."""
@@ -114,9 +133,13 @@ class InteractiveSession:
             if record.messages
             else ConversationHistory(system_prompt)
         )
-        reset = getattr(self.runner, "reset_context_state", None)
-        if callable(reset):
-            reset()
+        restore = getattr(self.runner, "restore_summary_state", None)
+        if callable(restore):
+            restore(record.summary)
+        else:
+            reset = getattr(self.runner, "reset_context_state", None)
+            if callable(reset):
+                reset()
 
 
 def _redact_text(value: str, sensitive_values: tuple[str, ...]) -> str:

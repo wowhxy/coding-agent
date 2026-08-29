@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -133,41 +134,41 @@ class ContextManager:
                 "system prompt and original user task exceed the context budget"
             )
 
-        additions: tuple[Message, ...] = ()
-        if self._workspace_memory:
+        additions: list[Message] = []
+        selected_memory = _select_workspace_memory(self._workspace_memory, messages)
+        memory_message: Message | None = None
+        if selected_memory:
             memory_message = Message(
                 Role.SYSTEM,
                 "Workspace memory (explicit user-maintained facts):\n"
-                + self._workspace_memory,
+                + selected_memory,
             )
-            if _serialized_size(anchors + (memory_message,)) <= self.max_context_chars:
-                additions = (memory_message,)
+            additions.append(memory_message)
+        summary_message: Message | None = None
         if summary is not None:
-            candidate = Message(
+            summary_message = Message(
                 Role.SYSTEM,
                 "Conversation summary (derived, not canonical history):\n"
                 + summary.text,
             )
-            if _serialized_size(anchors + additions + (candidate,)) <= self.max_context_chars:
-                additions += (candidate,)
+            additions.append(summary_message)
 
         turns = _group_turns(messages[2:])[-self.recent_turns :]
-        if (
-            turns
-            and _serialized_size(anchors + additions + tuple(turns[-1]))
-            > self.max_context_chars
-        ):
-            additions = additions[:1]
-        if turns and _serialized_size(anchors + additions + tuple(turns[-1])) > self.max_context_chars:
-            additions = ()
-        if turns and _serialized_size(anchors + tuple(turns[-1])) > self.max_context_chars:
+        def size() -> int:
+            return _serialized_size(anchors + tuple(additions) + _flatten(turns))
+
+        if size() > self.max_context_chars and summary_message is not None:
+            additions.remove(summary_message)
+        if size() > self.max_context_chars and memory_message is not None:
+            additions.remove(memory_message)
+        while len(turns) > 1 and size() > self.max_context_chars:
+            turns.pop(0)
+        if size() > self.max_context_chars:
             raise ContextBudgetError(
                 "permanent anchors and latest user-led turn exceed the context budget"
             )
-        while turns and _serialized_size(anchors + additions + _flatten(turns)) > self.max_context_chars:
-            turns.pop(0)
 
-        return anchors + additions + _flatten(turns)
+        return anchors + tuple(additions) + _flatten(turns)
 
 
 def _group_turns(messages: tuple[Message, ...]) -> list[list[Message]]:
@@ -204,3 +205,43 @@ def _serialized_size(messages: tuple[Message, ...]) -> int:
     return len(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
+
+
+_MEMORY_ENTRY = re.compile(r"^\[[0-9a-f]{8}\](?:\s|$)")
+_KEYWORD = re.compile(r"[^\W_]+", re.UNICODE)
+_MAX_SELECTED_MEMORY_ITEMS = 12
+_MAX_MEMORY_CONTEXT_CHARS = 8_000
+
+
+def _select_workspace_memory(text: str, messages: tuple[Message, ...]) -> str:
+    if not text:
+        return ""
+    entries: list[str] = []
+    for line in text.splitlines():
+        if _MEMORY_ENTRY.match(line):
+            entries.append(line)
+        elif entries:
+            entries[-1] += "\n" + line
+        elif line:
+            entries.append(line)
+    if len(entries) > _MAX_SELECTED_MEMORY_ITEMS:
+        recent_user_text = " ".join(
+            (message.content or "")
+            for message in messages[1:]
+            if message.role is Role.USER
+        )
+        query = _normalized_keywords(recent_user_text)
+        ranked = sorted(
+            enumerate(entries),
+            key=lambda indexed: (
+                -len(query & _normalized_keywords(indexed[1])),
+                indexed[0],
+            ),
+        )
+        entries = [entry for _, entry in ranked[:_MAX_SELECTED_MEMORY_ITEMS]]
+    selected = "\n".join(entries)
+    return truncate_text(selected, _MAX_MEMORY_CONTEXT_CHARS)
+
+
+def _normalized_keywords(text: str) -> set[str]:
+    return {token.casefold() for token in _KEYWORD.findall(text)}

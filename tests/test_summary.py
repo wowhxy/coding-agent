@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from coding_agent.agent import AgentRunner
 from coding_agent.context import ContextManager, ConversationHistory
 from coding_agent.model import ModelTransportError
@@ -86,3 +88,15 @@ def test_summary_rejects_tool_call_response_without_affecting_agent_turn() -> No
 
     assert result.status is RunStatus.FINAL_RESPONSE
     assert result.final_text == "normal final"
+
+
+def test_summary_rejects_non_utc_clock_value_as_best_effort_failure() -> None:
+    history = _history()
+    manager = SummaryManager(
+        FakeModelClient([ModelTurn("would be invalid")]),
+        threshold_chars=1,
+        recent_turns=1,
+        clock=lambda: datetime(2026, 8, 29),
+    )
+
+    assert manager.prepare(history) is None

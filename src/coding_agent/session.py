@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from .protocol import Message, Role, ToolCall
+from .summary import SummaryState
 
 
-SESSION_SCHEMA_VERSION = 2
+SESSION_SCHEMA_VERSION = 3
 
 _ROOT_FIELDS = {
     "schema_version",
@@ -24,8 +25,10 @@ _ROOT_FIELDS = {
     "created_at",
     "updated_at",
     "messages",
+    "summary",
 }
-_V1_ROOT_FIELDS = _ROOT_FIELDS - {"name"}
+_V2_ROOT_FIELDS = _ROOT_FIELDS - {"summary"}
+_V1_ROOT_FIELDS = _V2_ROOT_FIELDS - {"name"}
 _SESSION_ID = re.compile(r"[0-9a-f]{12}")
 
 
@@ -53,6 +56,7 @@ class SessionRecord:
     updated_at: datetime
     messages: tuple[Message, ...]
     name: str | None = None
+    summary: SummaryState | None = None
 
 
 def serialize_session(record: SessionRecord) -> str:
@@ -69,6 +73,7 @@ def serialize_session(record: SessionRecord) -> str:
         "created_at": _format_timestamp(record.created_at),
         "updated_at": _format_timestamp(record.updated_at),
         "messages": [_message_to_payload(message) for message in record.messages],
+        "summary": _summary_to_payload(record.summary),
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -89,11 +94,17 @@ def deserialize_session(text: str) -> SessionRecord:
         _corrupt("session schema version is missing")
 
     version = payload["schema_version"]
-    if type(version) in (int, float) and version not in (1, SESSION_SCHEMA_VERSION):
+    if type(version) in (int, float) and version not in (1, 2, SESSION_SCHEMA_VERSION):
         raise SessionError("SESSION_VERSION_UNSUPPORTED", "session schema version is unsupported")
-    if type(version) is not int or version not in (1, SESSION_SCHEMA_VERSION):
+    if type(version) is not int or version not in (1, 2, SESSION_SCHEMA_VERSION):
         _corrupt("session schema version is invalid")
-    expected_fields = _V1_ROOT_FIELDS if version == 1 else _ROOT_FIELDS
+    expected_fields = (
+        _V1_ROOT_FIELDS
+        if version == 1
+        else _V2_ROOT_FIELDS
+        if version == 2
+        else _ROOT_FIELDS
+    )
     if set(payload) != expected_fields:
         _corrupt("session document fields are invalid")
 
@@ -104,7 +115,12 @@ def deserialize_session(text: str) -> SessionRecord:
     name = None if version == 1 else _parse_optional_session_name(payload["name"])
     created_at = _parse_timestamp(payload["created_at"])
     updated_at = _parse_timestamp(payload["updated_at"])
-    messages = _parse_messages(payload["messages"], allow_empty=version == 2)
+    messages = _parse_messages(payload["messages"], allow_empty=version >= 2)
+    summary = (
+        _parse_summary_best_effort(payload["summary"], len(messages))
+        if version == SESSION_SCHEMA_VERSION
+        else None
+    )
 
     record = SessionRecord(
         session_id=session_id,
@@ -115,6 +131,7 @@ def deserialize_session(text: str) -> SessionRecord:
         updated_at=updated_at,
         messages=messages,
         name=name,
+        summary=summary,
     )
     _validate_record(record)
     return record
@@ -154,6 +171,20 @@ def redact_messages(
     )
 
 
+def redact_summary(
+    summary: SummaryState | None, sensitive_values: tuple[str, ...]
+) -> SummaryState | None:
+    """Return a summary with known non-empty sensitive values replaced."""
+
+    if summary is None:
+        return None
+    text = summary.text
+    for sensitive in sensitive_values:
+        if type(sensitive) is str and sensitive:
+            text = text.replace(sensitive, "[REDACTED]")
+    return SummaryState(text, summary.covered_message_count, summary.updated_at)
+
+
 def _validate_record(record: SessionRecord) -> None:
     if not isinstance(record, SessionRecord):
         _corrupt("session record is invalid")
@@ -166,6 +197,51 @@ def _validate_record(record: SessionRecord) -> None:
     _format_timestamp(record.created_at)
     _format_timestamp(record.updated_at)
     _validate_messages(record.messages)
+    if record.summary is not None:
+        _validate_summary(record.summary, len(record.messages))
+
+
+def _summary_to_payload(summary: SummaryState | None) -> dict[str, Any] | None:
+    if summary is None:
+        return None
+    return {
+        "text": summary.text,
+        "covered_message_count": summary.covered_message_count,
+        "updated_at": _format_timestamp(summary.updated_at),
+    }
+
+
+def _validate_summary(summary: Any, message_count: int) -> None:
+    if not isinstance(summary, SummaryState):
+        _corrupt("session summary is invalid")
+    if type(summary.text) is not str or not summary.text.strip():
+        _corrupt("session summary text is invalid")
+    maximum = max(0, message_count - 1)
+    if (
+        type(summary.covered_message_count) is not int
+        or summary.covered_message_count <= 0
+        or summary.covered_message_count > maximum
+    ):
+        _corrupt("session summary coverage is invalid")
+    _format_timestamp(summary.updated_at)
+
+
+def _parse_summary_best_effort(value: Any, message_count: int) -> SummaryState | None:
+    """Recover canonical history even when optional derived summary is invalid."""
+
+    if value is None:
+        return None
+    try:
+        _require_fields(value, {"text", "covered_message_count", "updated_at"})
+        summary = SummaryState(
+            text=value["text"],
+            covered_message_count=value["covered_message_count"],
+            updated_at=_parse_timestamp(value["updated_at"]),
+        )
+        _validate_summary(summary, message_count)
+        return summary
+    except (SessionError, TypeError):
+        return None
 
 
 def _parse_session_id(value: Any) -> str:

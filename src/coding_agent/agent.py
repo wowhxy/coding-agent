@@ -192,6 +192,17 @@ class AgentRunner:
 
         self._summary_state = None
 
+    @property
+    def summary_state(self) -> SummaryState | None:
+        """Return the current derived summary for session persistence."""
+
+        return self._summary_state
+
+    def restore_summary_state(self, state: SummaryState | None) -> None:
+        """Restore session-scoped derived context before the next turn."""
+
+        self._summary_state = state
+
     def set_workspace_memory(self, text: str) -> None:
         """Update the explicit workspace memory used for future model requests."""
 

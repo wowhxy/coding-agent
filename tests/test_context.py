@@ -7,6 +7,8 @@ from coding_agent.context import (
     truncate_text,
 )
 from coding_agent.protocol import Message, Role, ToolCall, ToolResult
+from coding_agent.summary import SummaryState
+from datetime import datetime, timezone
 
 
 def test_history_starts_with_permanent_system_and_user_anchors() -> None:
@@ -225,3 +227,28 @@ def test_prepare_tool_result_preserves_identity_and_error_fields() -> None:
 def test_context_limits_must_be_positive(keyword: str, values: dict[str, int]) -> None:
     with pytest.raises(ValueError, match="context limits must be positive"):
         ContextManager(**values)
+
+
+def test_budget_drops_summary_then_memory_before_older_recent_turns() -> None:
+    history = ConversationHistory("system", "original task")
+    history.append(Message(Role.ASSISTANT, "initial answer"))
+    history.append(Message(Role.USER, "older request"))
+    history.append(Message(Role.ASSISTANT, "O" * 500))
+    history.append(Message(Role.USER, "latest request"))
+    history.append(Message(Role.ASSISTANT, "latest answer"))
+    manager = ContextManager(max_context_chars=1_200, recent_turns=2)
+    manager.set_workspace_memory("build command: pytest")
+    summary = SummaryState(
+        "S" * 180,
+        1,
+        datetime(2026, 8, 29, tzinfo=timezone.utc),
+    )
+
+    messages = manager.build(history, summary=summary)
+    contents = [message.content or "" for message in messages]
+
+    assert any("Workspace memory" in content for content in contents)
+    assert all("Conversation summary" not in content for content in contents)
+    assert "older request" in contents
+    assert "O" * 500 in contents
+    assert contents[-2:] == ["latest request", "latest answer"]

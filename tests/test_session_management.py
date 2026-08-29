@@ -33,7 +33,7 @@ def _v1_document(workspace: Path) -> dict[str, object]:
     }
 
 
-def test_v1_session_migrates_to_optional_name_and_serializes_as_v2(tmp_path: Path) -> None:
+def test_v1_session_migrates_to_optional_fields_and_serializes_as_v3(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -41,8 +41,9 @@ def test_v1_session_migrates_to_optional_name_and_serializes_as_v2(tmp_path: Pat
     encoded = json.loads(serialize_session(record))
 
     assert record.name is None
-    assert encoded["schema_version"] == 2
+    assert encoded["schema_version"] == 3
     assert encoded["name"] is None
+    assert encoded["summary"] is None
 
 
 def test_v2_allows_empty_history_for_named_new_session(tmp_path: Path) -> None:

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from .context import ConversationHistory, truncate_text
 from .model import ModelClient
@@ -16,6 +18,7 @@ class SummaryState:
 
     text: str
     covered_message_count: int
+    updated_at: datetime
 
 
 class SummaryManager:
@@ -27,6 +30,7 @@ class SummaryManager:
         threshold_chars: int = 60_000,
         recent_turns: int = 8,
         max_summary_chars: int = 8_000,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         if min(threshold_chars, recent_turns, max_summary_chars) <= 0:
             raise ValueError("summary limits must be positive")
@@ -34,6 +38,7 @@ class SummaryManager:
         self.threshold_chars = threshold_chars
         self.recent_turns = recent_turns
         self.max_summary_chars = max_summary_chars
+        self.clock = clock
 
     def prepare(
         self,
@@ -56,7 +61,14 @@ class SummaryManager:
             if turn.tool_calls or not turn.final_text or not turn.final_text.strip():
                 return previous
             text = truncate_text(turn.final_text.strip(), self.max_summary_chars)
-            return SummaryState(text, len(old_messages))
+            updated_at = self.clock()
+            if (
+                not isinstance(updated_at, datetime)
+                or updated_at.tzinfo is None
+                or updated_at.utcoffset() != timedelta(0)
+            ):
+                return previous
+            return SummaryState(text, len(old_messages), updated_at)
         except Exception:
             return previous
 
