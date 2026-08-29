@@ -26,7 +26,7 @@ def test_submission_readme_constraints() -> None:
     assert "/exit 或输入阶段 Ctrl+C 正常退出" in text
     assert "运行阶段 Ctrl+C 丢弃未完成当前轮次" in text
     assert "无已提交轮次的新会话不留下 session 文件" in text
-    assert "默认交互启动恢复当前 workspace 的最近 session" in text
+    assert "默认恢复当前 workspace 的最近 session" in text
     assert "--new-session" in text
     assert "--resume-session" in text
     assert "本地 session JSON 是明文" in text
@@ -40,8 +40,12 @@ def test_submission_readme_constraints() -> None:
     assert "/recall <query>" in text
     assert "渐进压缩" in text
     assert "增量摘要" in text
-    assert "确认后" in text
+    assert "经确认后" in text
     assert "workspace 隔离" in text
+    assert "/plugins" in text
+    assert "/plugin enable" in text
+    assert "/plugin disable" in text
+    assert "不是安全沙箱" in text
     lines = text.splitlines()
     assert lines[1].startswith("Git 仓库：")
     repository_url = lines[1].removeprefix("Git 仓库：")
@@ -50,10 +54,25 @@ def test_submission_readme_constraints() -> None:
     )
 
 
+def test_plugin_demo_documents_trust_lifecycle_and_constrained_value() -> None:
+    text = Path("docs/plugin-demo.md").read_text(encoding="utf-8")
+
+    assert "trusted local code" in text
+    assert "not an OS sandbox" in text
+    assert "/plugins" in text
+    assert "/plugin enable git-readonly" in text
+    assert "/plugin disable git-readonly" in text
+    assert "shell=False" in text
+    assert "execute_command" in text
+    assert "cleanup" in text.lower()
+
+
 def test_submission_sources_contain_no_credential_like_values() -> None:
     files = [
         *Path("src").rglob("*.py"),
         *Path("tests").rglob("*.py"),
+        *Path("examples/plugins").rglob("*.py"),
+        *Path("docs").rglob("*.md"),
         Path("README.txt"),
         Path("pyproject.toml"),
     ]

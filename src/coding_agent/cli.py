@@ -20,6 +20,7 @@ from .model import ModelClient
 from .memory import WorkspaceMemoryStore
 from .memory_candidate import MemoryCandidateExtractor
 from .protocol import AgentEvent, RunResult, RunStatus
+from .plugins import PluginDiagnostic, PluginManager
 from .recall import RecallService, should_automatic_recall
 from .providers.openai_compatible import OpenAICompatibleClient
 from .session import SessionError, SessionRecord
@@ -340,6 +341,7 @@ def _run_agent(
     )
     print(f"[run] workspace: {config.workspace}")
     print(f"[run] provider: {provider_name}; model: {config.model}")
+    plugin_manager: PluginManager | None = None
     try:
         policy = _context_policy(config)
         context_manager = ContextManager(policy=policy)
@@ -351,9 +353,13 @@ def _run_agent(
         skill_registry = SkillRegistry(memory_root, config.workspace)
         skill_registry.discover()
         _print_skill_diagnostics(skill_registry.diagnostics, config.api_key)
+        registry = build_default_registry(config)
+        plugin_manager = PluginManager(memory_root, config.workspace, registry)
+        plugin_manager.restore_enabled()
+        _print_plugin_diagnostics(plugin_manager.diagnostics, config.api_key)
         runner = AgentRunner(
             model_client=client,
-            registry=build_default_registry(config),
+            registry=registry,
             context_manager=context_manager,
             max_steps=config.max_steps,
             event_sink=_event_sink(config.api_key),
@@ -367,6 +373,8 @@ def _run_agent(
         _print_skill_diagnostics(activation.diagnostics, config.api_key)
         return runner.run(SYSTEM_PROMPT, task)
     finally:
+        if plugin_manager is not None:
+            plugin_manager.close()
         close = getattr(client, "close", None)
         if callable(close):
             close()
@@ -419,6 +427,7 @@ def _run_interactive(
         config.thinking_mode,
     )
     scheduler: BackgroundScheduler | None = None
+    plugin_manager: PluginManager | None = None
     try:
         print(f"[run] workspace: {config.workspace}")
         print(f"[run] provider: {provider_name}; model: {config.model}")
@@ -428,9 +437,16 @@ def _run_interactive(
         policy = _context_policy(config)
         context_manager = ContextManager(policy=policy)
         context_manager.set_workspace_memories(memory_items)
+        registry = build_default_registry(config)
+        plugin_manager = PluginManager(
+            session_home, config.workspace, registry
+        )
+        plugin_manager.restore_enabled()
+        _print_plugin_diagnostics(plugin_manager.diagnostics, config.api_key)
+
         runner = AgentRunner(
             model_client=client,
-            registry=build_default_registry(config),
+            registry=registry,
             context_manager=context_manager,
             max_steps=config.max_steps,
             event_sink=_event_sink(config.api_key),
@@ -441,7 +457,9 @@ def _run_interactive(
         skill_activator = SkillActivator(skill_registry, SkillSelector(client))
         recall_service = RecallService(store)
 
-        def background_runtime() -> BackgroundRuntime:
+        def background_runtime(
+            enabled_plugin_names: tuple[str, ...]
+        ) -> BackgroundRuntime:
             background_memory = memory_store.context_items_for_context(
                 config.workspace
             )
@@ -453,11 +471,20 @@ def _run_interactive(
             )
             background_context = ContextManager(policy=policy)
             close = getattr(background_client, "close", None)
+            background_plugins: PluginManager | None = None
             try:
                 background_context.set_workspace_memories(background_memory)
+                background_registry = build_default_registry(config)
+                background_plugins = PluginManager(
+                    session_home, config.workspace, background_registry
+                )
+                background_plugins.load_snapshot(enabled_plugin_names)
+                _print_plugin_diagnostics(
+                    background_plugins.diagnostics, config.api_key
+                )
                 background_runner = AgentRunner(
                     model_client=background_client,
-                    registry=build_default_registry(config),
+                    registry=background_registry,
                     context_manager=background_context,
                     max_steps=config.max_steps,
                     event_sink=None,
@@ -478,12 +505,20 @@ def _run_interactive(
                         )
                     return activation.diagnostics
 
+                def close_background_runtime() -> None:
+                    assert background_plugins is not None
+                    background_plugins.close()
+                    if callable(close):
+                        close()
+
                 return BackgroundRuntime(
                     background_runner,
-                    close if callable(close) else (lambda: None),
+                    close_background_runtime,
                     prepare_background_skills,
                 )
             except Exception:
+                if background_plugins is not None:
+                    background_plugins.close()
                 if callable(close):
                     close()
                 raise
@@ -515,11 +550,14 @@ def _run_interactive(
             skill_registry=skill_registry,
             skill_activator=skill_activator,
             recall_service=recall_service,
+            plugin_manager=plugin_manager,
         )
         return shell.run()
     finally:
         if scheduler is not None:
             scheduler.shutdown()
+        if plugin_manager is not None:
+            plugin_manager.close()
         close = getattr(client, "close", None)
         if callable(close):
             close()
@@ -593,6 +631,17 @@ def _print_skill_diagnostics(
     for diagnostic in diagnostics:
         print(
             f"[skill warning] {diagnostic.code}: "
+            f"{_redact(diagnostic.message, api_key)}",
+            file=sys.stderr,
+        )
+
+
+def _print_plugin_diagnostics(
+    diagnostics: tuple[PluginDiagnostic, ...], api_key: str
+) -> None:
+    for diagnostic in diagnostics:
+        print(
+            f"[plugin warning] {diagnostic.code}: "
             f"{_redact(diagnostic.message, api_key)}",
             file=sys.stderr,
         )

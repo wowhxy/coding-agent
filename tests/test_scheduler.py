@@ -35,7 +35,7 @@ def test_background_job_persists_completed_turn_and_closes_runtime(tmp_path: Pat
     record = _saved(store, workspace, "111111111111")
     closed: list[bool] = []
 
-    def runtime() -> BackgroundRuntime:
+    def runtime(_plugin_names: tuple[str, ...]) -> BackgroundRuntime:
         runner = AgentRunner(FakeModelClient([ModelTurn("background done")]), ToolRegistry(), ContextManager())
         return BackgroundRuntime(runner, lambda: closed.append(True))
 
@@ -75,7 +75,7 @@ def test_same_session_busy_is_rejected_but_other_session_can_run(tmp_path: Path)
 
     scheduler = BackgroundScheduler(
         store,
-        lambda: BackgroundRuntime(BlockingRunner(), lambda: None),  # type: ignore[arg-type]
+        lambda _plugin_names: BackgroundRuntime(BlockingRunner(), lambda: None),  # type: ignore[arg-type]
         id_generator=iter(("aaaaaaaa", "bbbbbbbb")).__next__,
         max_workers=2,
     )
@@ -113,7 +113,7 @@ def test_running_job_cancellation_is_cooperative_and_does_not_commit_turn(tmp_pa
 
     scheduler = BackgroundScheduler(
         store,
-        lambda: BackgroundRuntime(BoundaryRunner(), lambda: None),  # type: ignore[arg-type]
+        lambda _plugin_names: BackgroundRuntime(BoundaryRunner(), lambda: None),  # type: ignore[arg-type]
         id_generator=lambda: "aaaaaaaa",
         max_workers=1,
     )
@@ -160,7 +160,7 @@ def test_queued_cancellation_and_worker_failure_are_isolated(tmp_path: Path) -> 
             history.append(Message(Role.ASSISTANT, "done"))
             return RunResult(RunStatus.FINAL_RESPONSE, "done", 1, None)
 
-    def runtime() -> BackgroundRuntime:
+    def runtime(_plugin_names: tuple[str, ...]) -> BackgroundRuntime:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -222,7 +222,7 @@ def test_background_prepares_skills_once_from_submitted_manual_snapshot(
     )
     record = _saved(store, workspace, "111111111111")
 
-    def runtime() -> BackgroundRuntime:
+    def runtime(_plugin_names: tuple[str, ...]) -> BackgroundRuntime:
         runner = AgentRunner(model, ToolRegistry(), ContextManager())
         activator = SkillActivator(registry, SkillSelector(model))
 

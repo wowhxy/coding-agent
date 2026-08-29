@@ -47,7 +47,7 @@ def test_background_session_and_new_foreground_session_complete_independently(
     )
     background_clients: list[FakeModelClient] = []
 
-    def runtime() -> BackgroundRuntime:
+    def runtime(_plugin_names: tuple[str, ...]) -> BackgroundRuntime:
         model = FakeModelClient([ModelTurn("background complete")])
         background_clients.append(model)
         return BackgroundRuntime(

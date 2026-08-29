@@ -1,0 +1,6 @@
+{
+  "name": "git-readonly",
+  "version": "1.0.0",
+  "description": "Read-only Git inspection tools for coding-agent.",
+  "entrypoint": "plugin.py"
+}

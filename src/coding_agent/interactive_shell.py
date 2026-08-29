@@ -8,6 +8,7 @@ from .interactive import InteractiveSession, _redact_text
 from .memory import WorkspaceMemoryStore
 from .memory_candidate import MemoryCandidateExtractor, is_safe_candidate
 from .protocol import Message, RunStatus
+from .plugins import PluginError, PluginManager
 from .recall import RecallEntry, RecallService, should_automatic_recall
 from .session import SessionError
 from .scheduler import BackgroundScheduler
@@ -32,6 +33,7 @@ class InteractiveShell:
         manual_skills: ManualSkillState | None = None,
         skill_activator: SkillActivator | None = None,
         recall_service: RecallService | None = None,
+        plugin_manager: PluginManager | None = None,
     ) -> None:
         self.session = session
         self.store = store
@@ -44,6 +46,7 @@ class InteractiveShell:
         self.manual_skills = manual_skills or ManualSkillState()
         self.skill_activator = skill_activator
         self.recall_service = recall_service
+        self.plugin_manager = plugin_manager
         self._pending_recall: tuple[RecallEntry, ...] = ()
 
     def run(self) -> int:
@@ -113,6 +116,10 @@ class InteractiveShell:
                     self._skills()
                 elif normalized == "/skill":
                     self._skill(argument)
+                elif normalized == "/plugins" and not argument:
+                    self._plugins()
+                elif normalized == "/plugin":
+                    self._plugin(argument)
                 elif normalized == "/background":
                     self._background(argument)
                 elif normalized == "/jobs" and not argument:
@@ -123,7 +130,7 @@ class InteractiveShell:
                     self.output(
                         f"[error] unknown command: {command}; "
                         "use /sessions, /new, /memory, /recall, /skills, "
-                        "/jobs, or /exit"
+                        "/plugins, /jobs, or /exit"
                     )
             except KeyboardInterrupt:
                 return 0
@@ -131,6 +138,8 @@ class InteractiveShell:
                 self._print_error(error)
             except SkillError as error:
                 self._print_skill_error(error)
+            except PluginError as error:
+                self.output(f"[error] {error.code}: {error.message}")
 
     def _print_error(self, error: SessionError) -> None:
         message = _redact_text(error.message, self.session.sensitive_values)
@@ -139,6 +148,53 @@ class InteractiveShell:
     def _print_skill_error(self, error: SkillError) -> None:
         message = _redact_text(error.message, self.session.sensitive_values)
         self.output(f"[error] {error.error_code}: {message}")
+
+    def _plugins(self) -> None:
+        manager = self._require_plugin_manager()
+        plugins = manager.discover()
+        self.output("NAME VERSION STATUS DESCRIPTION")
+        if not plugins:
+            self.output("[plugin] none")
+        for item in plugins:
+            metadata = item.metadata
+            description = _redact_text(
+                metadata.description, self.session.sensitive_values
+            )
+            self.output(
+                f"{metadata.name}  {metadata.version}  {item.status}  "
+                f"{description}"
+            )
+        for diagnostic in manager.diagnostics:
+            message = _redact_text(
+                diagnostic.message, self.session.sensitive_values
+            )
+            self.output(
+                f"[plugin warning] {diagnostic.code}: {message}"
+            )
+
+    def _plugin(self, argument: str) -> None:
+        manager = self._require_plugin_manager()
+        action, _, value = argument.strip().partition(" ")
+        name = value.strip()
+        if action.casefold() == "enable" and name:
+            manager.enable(name)
+            self.output(f"[plugin] enabled: {name}")
+            return
+        if action.casefold() == "disable" and name:
+            manager.disable(name)
+            self.output(f"[plugin] disabled: {name}")
+            return
+        raise PluginError(
+            "PLUGIN_COMMAND_INVALID",
+            "use /plugin enable <name> or /plugin disable <name>",
+        )
+
+    def _require_plugin_manager(self) -> PluginManager:
+        if self.plugin_manager is None:
+            raise PluginError(
+                "PLUGIN_UNAVAILABLE", "plugin system is unavailable"
+            )
+        return self.plugin_manager
 
     def _new(self) -> None:
         current = self.session.record
@@ -422,6 +478,11 @@ class InteractiveShell:
             task,
             self.session.sensitive_values,
             self.manual_skills.names(persisted.session_id),
+            (
+                self.plugin_manager.enabled_names
+                if self.plugin_manager is not None
+                else ()
+            ),
         )
         self.output(
             f"[job] started: {job.id}; session: {job.session_id}"

@@ -65,6 +65,7 @@ class _JobState:
     sensitive_values: tuple[str, ...]
     cancel_event: threading.Event
     manual_skill_names: tuple[str, ...] = ()
+    enabled_plugin_names: tuple[str, ...] = ()
     future: Future[None] | None = None
 
 
@@ -74,7 +75,7 @@ class BackgroundScheduler:
     def __init__(
         self,
         store: JsonSessionStore,
-        runtime_factory: Callable[[], BackgroundRuntime],
+        runtime_factory: Callable[[tuple[str, ...]], BackgroundRuntime],
         id_generator: Callable[[], str] = lambda: secrets.token_hex(4),
         max_workers: int = 2,
     ) -> None:
@@ -96,9 +97,14 @@ class BackgroundScheduler:
         task: str,
         sensitive_values: tuple[str, ...],
         manual_skill_names: tuple[str, ...] = (),
+        enabled_plugin_names: tuple[str, ...] = (),
     ) -> BackgroundJob:
         if type(task) is not str or not task.strip():
             raise SessionError("JOB_INVALID", "background task is required")
+        if type(enabled_plugin_names) is not tuple or any(
+            type(name) is not str for name in enabled_plugin_names
+        ):
+            raise SessionError("JOB_INVALID", "plugin snapshot is invalid")
         with self._lock:
             if self._closed:
                 raise SessionError("JOB_UNAVAILABLE", "background scheduler is closed")
@@ -123,6 +129,7 @@ class BackgroundScheduler:
                 sensitive_values,
                 threading.Event(),
                 manual_skill_names,
+                enabled_plugin_names,
             )
             self._jobs[job_id] = state
             state.future = self._executor.submit(self._run, job_id)
@@ -199,7 +206,7 @@ class BackgroundScheduler:
                 if record.messages
                 else ConversationHistory(SYSTEM_PROMPT)
             )
-            runtime = self.runtime_factory()
+            runtime = self.runtime_factory(state.enabled_plugin_names)
             restore_summary = getattr(runtime.runner, "restore_summary_state", None)
             if callable(restore_summary):
                 restore_summary(record.summary)

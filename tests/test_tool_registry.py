@@ -189,3 +189,77 @@ def test_unexpected_handler_exception_returns_internal_error_without_traceback()
     assert result.error_message is not None
     assert "explode" in result.error_message
     assert "Traceback" not in result.error_message
+
+
+def test_transactional_source_registration_and_cleanup_preserve_builtins() -> None:
+    registry = ToolRegistry()
+    builtin = _echo_tool("builtin_echo")
+    first = _echo_tool("plugin_first")
+    second = _echo_tool("plugin_second")
+    registry.register(builtin)
+
+    registry.register_many((first, second), source="plugin:demo")
+
+    assert registry.source_of("builtin_echo") == "builtin"
+    assert registry.source_of("plugin_first") == "plugin:demo"
+    assert [item.name for item in registry.definitions()] == [
+        "builtin_echo",
+        "plugin_first",
+        "plugin_second",
+    ]
+    assert registry.unregister_source("plugin:demo") == (
+        "plugin_first",
+        "plugin_second",
+    )
+    assert [item.name for item in registry.definitions()] == ["builtin_echo"]
+    assert registry.unregister_source("plugin:demo") == ()
+    with pytest.raises(ValueError, match="built-in"):
+        registry.unregister_source("builtin")
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        (_echo_tool("same"), _echo_tool("same")),
+        (object(),),
+        (
+            RegisteredTool(
+                ToolDefinition("bad-name", "description", {"type": "object"}),
+                _validate_echo,
+                _handle_echo,
+            ),
+        ),
+        (
+            RegisteredTool(
+                ToolDefinition("bad_schema", "description", {"type": "array"}),
+                _validate_echo,
+                _handle_echo,
+            ),
+        ),
+    ],
+)
+def test_invalid_plugin_batch_is_wholly_rejected(
+    tools: tuple[object, ...],
+) -> None:
+    registry = ToolRegistry()
+    registry.register(_echo_tool("builtin_echo"))
+
+    with pytest.raises((TypeError, ValueError)):
+        registry.register_many(tools, source="plugin:demo")  # type: ignore[arg-type]
+
+    assert [item.name for item in registry.definitions()] == ["builtin_echo"]
+    assert registry.source_of("same") is None
+
+
+def test_batch_collision_leaves_every_existing_tool_unchanged() -> None:
+    registry = ToolRegistry()
+    registry.register(_echo_tool("builtin_echo"))
+
+    with pytest.raises(ValueError, match="duplicate tool: builtin_echo"):
+        registry.register_many(
+            (_echo_tool("new_tool"), _echo_tool("builtin_echo")),
+            source="plugin:demo",
+        )
+
+    assert [item.name for item in registry.definitions()] == ["builtin_echo"]
+    assert registry.source_of("new_tool") is None

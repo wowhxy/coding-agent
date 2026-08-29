@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +17,7 @@ class ToolArgumentError(ValueError):
 
 ToolValidator = Callable[[dict[str, Any]], dict[str, Any]]
 ToolHandler = Callable[[str, dict[str, Any]], ToolResult]
+_TOOL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,14 +34,53 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, RegisteredTool] = {}
+        self._sources: dict[str, str] = {}
 
     def register(self, tool: RegisteredTool) -> None:
         """Register one uniquely named tool."""
 
-        name = tool.definition.name
-        if name in self._tools:
-            raise ValueError(f"duplicate tool: {name}")
-        self._tools[name] = tool
+        self.register_many((tool,), source="builtin")
+
+    def register_many(
+        self,
+        tools: tuple[RegisteredTool, ...],
+        *,
+        source: str,
+    ) -> None:
+        """Validate and atomically register a source-owned tool batch."""
+
+        if type(tools) is not tuple or not tools:
+            raise TypeError("tools must be a non-empty RegisteredTool tuple")
+        if type(source) is not str or not source or len(source) > 128:
+            raise ValueError("tool source is invalid")
+        names: list[str] = []
+        for tool in tools:
+            _validate_registered_tool(tool)
+            name = tool.definition.name
+            if name in names or name in self._tools:
+                raise ValueError(f"duplicate tool: {name}")
+            names.append(name)
+        for name, tool in zip(names, tools, strict=True):
+            self._tools[name] = tool
+            self._sources[name] = source
+
+    def unregister_source(self, source: str) -> tuple[str, ...]:
+        """Remove only tools owned by a non-built-in source."""
+
+        if source == "builtin":
+            raise ValueError("built-in tools cannot be unregistered")
+        removed = tuple(
+            name for name in self._tools if self._sources.get(name) == source
+        )
+        for name in removed:
+            del self._tools[name]
+            del self._sources[name]
+        return removed
+
+    def source_of(self, tool_name: str) -> str | None:
+        """Return the registered owner of one tool name."""
+
+        return self._sources.get(tool_name)
 
     def definitions(self) -> tuple[ToolDefinition, ...]:
         """Return model-facing definitions in deterministic registration order."""
@@ -113,6 +154,34 @@ def require_keys(
         problems.append(f"unknown {label}: {', '.join(unknown)}")
     if problems:
         raise ToolArgumentError("; ".join(problems))
+
+
+def _validate_registered_tool(tool: Any) -> None:
+    if not isinstance(tool, RegisteredTool):
+        raise TypeError("plugin tools must use RegisteredTool")
+    definition = tool.definition
+    if not isinstance(definition, ToolDefinition):
+        raise TypeError("tool definition is invalid")
+    if (
+        type(definition.name) is not str
+        or _TOOL_NAME.fullmatch(definition.name) is None
+    ):
+        raise ValueError("tool name is invalid")
+    if (
+        type(definition.description) is not str
+        or not definition.description.strip()
+        or len(definition.description) > 1_000
+    ):
+        raise ValueError("tool description is invalid")
+    schema = definition.input_schema
+    if type(schema) is not dict or schema.get("type") != "object":
+        raise ValueError("tool input schema must describe an object")
+    try:
+        json.dumps(schema, ensure_ascii=False)
+    except (TypeError, ValueError):
+        raise ValueError("tool input schema is not JSON serializable") from None
+    if not callable(tool.validate) or not callable(tool.handler):
+        raise TypeError("tool validator and handler must be callable")
 
 
 def _failure(call: ToolCall, error_code: str, error_message: str) -> ToolResult:
