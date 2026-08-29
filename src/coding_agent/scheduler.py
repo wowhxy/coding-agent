@@ -16,6 +16,7 @@ from .context import ConversationHistory
 from .protocol import RunResult, RunStatus
 from .session import SessionError, SessionRecord, redact_messages, redact_summary
 from .session_store import JsonSessionStore
+from .skills import SkillDiagnostic
 from .system_prompt import SYSTEM_PROMPT
 
 
@@ -42,6 +43,9 @@ class JobStatus(str, Enum):
 class BackgroundRuntime:
     runner: AgentRunner
     close: Callable[[], None]
+    prepare_task: (
+        Callable[[str, tuple[str, ...]], tuple[SkillDiagnostic, ...]] | None
+    ) = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +64,7 @@ class _JobState:
     workspace: Path
     sensitive_values: tuple[str, ...]
     cancel_event: threading.Event
+    manual_skill_names: tuple[str, ...] = ()
     future: Future[None] | None = None
 
 
@@ -90,6 +95,7 @@ class BackgroundScheduler:
         record: SessionRecord,
         task: str,
         sensitive_values: tuple[str, ...],
+        manual_skill_names: tuple[str, ...] = (),
     ) -> BackgroundJob:
         if type(task) is not str or not task.strip():
             raise SessionError("JOB_INVALID", "background task is required")
@@ -116,6 +122,7 @@ class BackgroundScheduler:
                 record.workspace,
                 sensitive_values,
                 threading.Event(),
+                manual_skill_names,
             )
             self._jobs[job_id] = state
             state.future = self._executor.submit(self._run, job_id)
@@ -196,6 +203,10 @@ class BackgroundScheduler:
             restore_summary = getattr(runtime.runner, "restore_summary_state", None)
             if callable(restore_summary):
                 restore_summary(record.summary)
+            if runtime.prepare_task is not None:
+                runtime.prepare_task(
+                    state.snapshot.task, state.manual_skill_names
+                )
             result = runtime.runner.run_turn(
                 history,
                 state.snapshot.task,

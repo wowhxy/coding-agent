@@ -14,6 +14,8 @@ from coding_agent.scheduler import BackgroundRuntime, BackgroundScheduler, JobSt
 from coding_agent.session import SessionError
 from coding_agent.session_store import JsonSessionStore
 from coding_agent.tools.registry import ToolRegistry
+from coding_agent.skill_selector import SkillActivator, SkillSelector
+from coding_agent.skills import SkillRegistry
 from fakes import FakeModelClient
 
 
@@ -194,3 +196,60 @@ def test_queued_cancellation_and_worker_failure_are_isolated(tmp_path: Path) -> 
     assert store.load_session(later.session_id, workspace).messages[-1] == Message(
         Role.ASSISTANT, "later done"
     )
+
+
+def test_background_prepares_skills_once_from_submitted_manual_snapshot(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "skill-home"
+    workspace.mkdir()
+    home.mkdir()
+    for name in ("manual", "automatic"):
+        package = home / "skills" / name
+        package.mkdir(parents=True)
+        (package / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name} workflow.\n---\n\n{name} body\n",
+            encoding="utf-8",
+        )
+    registry = SkillRegistry(home, workspace)
+    registry.discover()
+    model = FakeModelClient(
+        [ModelTurn('{"skills":["automatic"]}'), ModelTurn("background done")]
+    )
+    store = JsonSessionStore(
+        tmp_path / "sessions", clock=lambda: NOW, id_generator=lambda: "111111111111"
+    )
+    record = _saved(store, workspace, "111111111111")
+
+    def runtime() -> BackgroundRuntime:
+        runner = AgentRunner(model, ToolRegistry(), ContextManager())
+        activator = SkillActivator(registry, SkillSelector(model))
+
+        def prepare(task: str, manual_names: tuple[str, ...]):
+            result = activator.prepare(task, manual_names)
+            runner.set_active_skills(result.skills)
+            return result.diagnostics
+
+        return BackgroundRuntime(runner, lambda: None, prepare)
+
+    scheduler = BackgroundScheduler(
+        store, runtime, id_generator=lambda: "aaaaaaaa", max_workers=1
+    )
+    try:
+        job = scheduler.submit(record, "background task", (), ("manual",))
+        completed = scheduler.wait(job.id, timeout=2)
+    finally:
+        scheduler.shutdown()
+
+    assert completed.status is JobStatus.COMPLETED
+    assert len(model.calls) == 2
+    selector_payload = "\n".join(
+        item.content or "" for item in model.calls[0][0]
+    )
+    assert "automatic" in selector_payload
+    assert '"name":"manual"' not in selector_payload
+    guidance = model.calls[1][0][1].content or ""
+    assert guidance.index("manual body") < guidance.index("automatic body")
+    persisted = store.load_session(record.session_id, workspace).messages
+    assert all('{"skills"' not in (item.content or "") for item in persisted)

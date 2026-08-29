@@ -16,6 +16,7 @@ from .protocol import (
 )
 from .tools.registry import ToolRegistry
 from .summary import SummaryManager, SummaryState
+from .skills import ActiveSkill
 
 
 EventSink = Callable[[AgentEvent], None]
@@ -207,6 +208,11 @@ class AgentRunner:
         """Update the explicit workspace memory used for future model requests."""
 
         self.context_manager.set_workspace_memory(text)
+
+    def set_active_skills(self, skills: tuple[ActiveSkill, ...]) -> None:
+        """Update transient Skill guidance used for future model requests."""
+
+        self.context_manager.set_active_skills(skills)
 
     def _finish(
         self,

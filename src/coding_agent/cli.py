@@ -23,6 +23,8 @@ from .providers.openai_compatible import OpenAICompatibleClient
 from .session import SessionError, SessionRecord
 from .scheduler import BackgroundRuntime, BackgroundScheduler
 from .session_store import JsonSessionStore, resolve_session_home
+from .skill_selector import SkillActivator, SkillSelector
+from .skills import SkillDiagnostic, SkillRegistry
 from .summary import SummaryManager
 from .system_prompt import SYSTEM_PROMPT
 from .tools import build_default_registry
@@ -325,6 +327,9 @@ def _run_agent(
         context_manager.set_workspace_memory(
             WorkspaceMemoryStore(memory_root).render_for_context(config.workspace)
         )
+        skill_registry = SkillRegistry(memory_root, config.workspace)
+        skill_registry.discover()
+        _print_skill_diagnostics(skill_registry.diagnostics, config.api_key)
         runner = AgentRunner(
             model_client=client,
             registry=build_default_registry(config),
@@ -334,6 +339,11 @@ def _run_agent(
             text_sink=_stream_sink(config.api_key),
             summary_manager=SummaryManager(client),
         )
+        activation = SkillActivator(
+            skill_registry, SkillSelector(client)
+        ).prepare(task)
+        runner.set_active_skills(activation.skills)
+        _print_skill_diagnostics(activation.diagnostics, config.api_key)
         return runner.run(SYSTEM_PROMPT, task)
     finally:
         close = getattr(client, "close", None)
@@ -353,12 +363,11 @@ def _run_interactive(
     input_reader: InputReader,
 ) -> int:
     try:
-        store = session_store_factory(
-            resolve_session_home(runtime_environment)
-        )
-        memory_store = WorkspaceMemoryStore(
-            resolve_session_home(runtime_environment)
-        )
+        session_home = resolve_session_home(runtime_environment)
+        store = session_store_factory(session_home)
+        memory_store = WorkspaceMemoryStore(session_home)
+        skill_registry = SkillRegistry(session_home, config.workspace)
+        skill_registry.discover()
         record, selection = _select_session(
             store,
             config,
@@ -380,6 +389,7 @@ def _run_interactive(
         return 7
 
     _print_session_warnings(record, provider_name, config)
+    _print_skill_diagnostics(skill_registry.diagnostics, config.api_key)
 
     client = client_factory(
         config.base_url,
@@ -410,6 +420,7 @@ def _run_interactive(
             summary_manager=SummaryManager(client),
         )
         runner.restore_summary_state(record.summary)
+        skill_activator = SkillActivator(skill_registry, SkillSelector(client))
 
         def background_runtime() -> BackgroundRuntime:
             background_memory = memory_store.render_for_context(config.workspace)
@@ -436,9 +447,20 @@ def _run_interactive(
                     text_sink=None,
                     summary_manager=SummaryManager(background_client),
                 )
+
+                def prepare_background_skills(
+                    task: str, manual_names: tuple[str, ...]
+                ) -> tuple[SkillDiagnostic, ...]:
+                    activation = SkillActivator(
+                        skill_registry, SkillSelector(background_client)
+                    ).prepare(task, manual_names)
+                    background_runner.set_active_skills(activation.skills)
+                    return activation.diagnostics
+
                 return BackgroundRuntime(
                     background_runner,
                     close if callable(close) else (lambda: None),
+                    prepare_background_skills,
                 )
             except Exception:
                 if callable(close):
@@ -469,6 +491,8 @@ def _run_interactive(
             memory_store=memory_store,
             scheduler=scheduler,
             candidate_extractor=MemoryCandidateExtractor(client),
+            skill_registry=skill_registry,
+            skill_activator=skill_activator,
         )
         return shell.run()
     finally:
@@ -539,6 +563,17 @@ def _print_session_error(error: SessionError, api_key: str) -> None:
         f"[error] {error.error_code}: {_redact(error.message, api_key)}",
         file=sys.stderr,
     )
+
+
+def _print_skill_diagnostics(
+    diagnostics: tuple[SkillDiagnostic, ...], api_key: str
+) -> None:
+    for diagnostic in diagnostics:
+        print(
+            f"[skill warning] {diagnostic.code}: "
+            f"{_redact(diagnostic.message, api_key)}",
+            file=sys.stderr,
+        )
 
 
 def _event_sink(api_key: str) -> Callable[[AgentEvent], None]:

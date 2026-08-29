@@ -33,6 +33,10 @@ def test_submission_readme_constraints() -> None:
     assert "任务、源码和工具输出" in text
     assert "不要粘贴秘密" in text
     assert "FINAL_RESPONSE 和持久化成功都不证明任务语义正确" in text
+    assert "SKILL.md" in text
+    assert "/skills" in text
+    assert "/skill use" in text
+    assert "automatic" in text
     lines = text.splitlines()
     assert lines[1].startswith("Git 仓库：")
     repository_url = lines[1].removeprefix("Git 仓库：")

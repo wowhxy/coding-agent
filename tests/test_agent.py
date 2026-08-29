@@ -20,7 +20,10 @@ from coding_agent.protocol import (
     ToolResult,
 )
 from coding_agent.tools.registry import RegisteredTool, ToolRegistry, require_keys
+from coding_agent.skills import ActiveSkill, Skill, SkillMetadata
+from coding_agent.system_prompt import SYSTEM_PROMPT
 from fakes import FakeModelClient
+from pathlib import Path
 
 
 def _register_static_tool(
@@ -404,3 +407,29 @@ def test_fake_model_client_records_snapshots_and_rejects_exhaustion() -> None:
 def test_max_steps_must_be_positive() -> None:
     with pytest.raises(ValueError, match="max_steps must be positive"):
         AgentRunner(FakeModelClient([]), ToolRegistry(), ContextManager(), max_steps=0)
+
+
+def test_core_prompt_and_runner_skill_setter_keep_guidance_subordinate() -> None:
+    model = FakeModelClient([ModelTurn("done")])
+    runner = AgentRunner(model, ToolRegistry(), ContextManager())
+    metadata = SkillMetadata("method", "Method guidance.", "user", Path("SKILL.md"))
+    runner.set_active_skills((ActiveSkill(Skill(metadata, "Use this workflow."), "manual"),))
+
+    runner.run(SYSTEM_PROMPT, "task")
+
+    request = model.calls[0][0]
+    core = request[0].content or ""
+    guidance = request[1].content or ""
+    assert all(
+        phrase in core
+        for phrase in (
+            "untrusted, subordinate",
+            "ToolRegistry",
+            "workspace containment",
+            "credentials",
+            "Git",
+            "termination rules",
+        )
+    )
+    assert guidance.startswith("[Subordinate Skill Guidance]")
+    assert request[2] == Message(Role.USER, "task")

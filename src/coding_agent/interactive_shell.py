@@ -11,6 +11,8 @@ from .protocol import Message, RunStatus
 from .session import SessionError
 from .scheduler import BackgroundScheduler
 from .session_store import JsonSessionStore, SessionSummary
+from .skill_selector import SkillActivator
+from .skills import ManualSkillState, SkillError, SkillRegistry
 
 
 class InteractiveShell:
@@ -25,6 +27,9 @@ class InteractiveShell:
         memory_store: WorkspaceMemoryStore | None = None,
         scheduler: BackgroundScheduler | None = None,
         candidate_extractor: MemoryCandidateExtractor | None = None,
+        skill_registry: SkillRegistry | None = None,
+        manual_skills: ManualSkillState | None = None,
+        skill_activator: SkillActivator | None = None,
     ) -> None:
         self.session = session
         self.store = store
@@ -33,6 +38,9 @@ class InteractiveShell:
         self.memory_store = memory_store
         self.scheduler = scheduler
         self.candidate_extractor = candidate_extractor
+        self.skill_registry = skill_registry
+        self.manual_skills = manual_skills or ManualSkillState()
+        self.skill_activator = skill_activator
 
     def run(self) -> int:
         while True:
@@ -60,12 +68,7 @@ class InteractiveShell:
                         continue
                     self._refresh_active_session()
                 try:
-                    before = len(self.session.history.messages)
-                    result = self.session.execute(raw)
-                    if result.status is RunStatus.FINAL_RESPONSE:
-                        self._capture_candidates(
-                            self.session.history.messages[before:]
-                        )
+                    self._execute_task(raw, capture_candidates=True)
                 except KeyboardInterrupt:
                     return 0
                 except SessionError as error:
@@ -94,12 +97,16 @@ class InteractiveShell:
                     multiline = self._read_multiline()
                     if multiline is not None and multiline.strip():
                         try:
-                            self.session.execute(multiline)
+                            self._execute_task(multiline, capture_candidates=False)
                         except SessionError as error:
                             self._print_error(error)
                             return 7
                 elif normalized == "/memory":
                     self._memory(argument)
+                elif normalized == "/skills" and not argument:
+                    self._skills()
+                elif normalized == "/skill":
+                    self._skill(argument)
                 elif normalized == "/background":
                     self._background(argument)
                 elif normalized == "/jobs" and not argument:
@@ -109,14 +116,20 @@ class InteractiveShell:
                 else:
                     self.output(
                         f"[error] unknown command: {command}; "
-                        "use /sessions, /new, /memory, /jobs, or /exit"
+                        "use /sessions, /new, /memory, /skills, /jobs, or /exit"
                     )
             except KeyboardInterrupt:
                 return 0
             except SessionError as error:
                 self._print_error(error)
+            except SkillError as error:
+                self._print_skill_error(error)
 
     def _print_error(self, error: SessionError) -> None:
+        message = _redact_text(error.message, self.session.sensitive_values)
+        self.output(f"[error] {error.error_code}: {message}")
+
+    def _print_skill_error(self, error: SkillError) -> None:
         message = _redact_text(error.message, self.session.sensitive_values)
         self.output(f"[error] {error.error_code}: {message}")
 
@@ -145,6 +158,7 @@ class InteractiveShell:
             selected = self.store.create_session(
                 current.workspace, self.session.provider, self.session.model
             )
+        self.manual_skills.remove_session(current.session_id)
         self.session.activate(selected)
         self.output(
             f"[session] deleted {current.session_id}; active: {selected.session_id}"
@@ -185,6 +199,67 @@ class InteractiveShell:
             if command == "/send":
                 return "\n".join(lines)
             lines.append(line)
+
+    def _execute_task(self, task: str, *, capture_candidates: bool) -> None:
+        runner = self.session.runner
+        set_active = getattr(runner, "set_active_skills", None)
+        before = len(self.session.history.messages)
+        if self.skill_activator is not None:
+            result = self.skill_activator.prepare(
+                task,
+                self.manual_skills.names(self.session.record.session_id),
+            )
+            if callable(set_active):
+                set_active(result.skills)
+            for diagnostic in result.diagnostics:
+                self.output(
+                    f"[skill warning] {diagnostic.code}: {diagnostic.message}"
+                )
+        try:
+            run_result = self.session.execute(task)
+            if capture_candidates and run_result.status is RunStatus.FINAL_RESPONSE:
+                self._capture_candidates(self.session.history.messages[before:])
+        finally:
+            if callable(set_active):
+                set_active(())
+
+    def _skills(self) -> None:
+        registry = self._require_skill_registry()
+        metadata = registry.metadata
+        active = set(self.manual_skills.names(self.session.record.session_id))
+        if not metadata:
+            self.output("[skill] none")
+        for item in metadata:
+            status = "active" if item.name in active else "inactive"
+            self.output(f"[skill] {item.name}  {item.scope}  {status}")
+        for diagnostic in registry.diagnostics:
+            self.output(f"[skill warning] {diagnostic.code}: {diagnostic.message}")
+
+    def _skill(self, argument: str) -> None:
+        registry = self._require_skill_registry()
+        action, _, value = argument.strip().partition(" ")
+        normalized = action.casefold()
+        name = value.strip()
+        session_id = self.session.record.session_id
+        if normalized == "use" and name:
+            self.manual_skills.use(session_id, name, registry)
+            self.output(f"[skill] active: {name}")
+        elif normalized == "off" and name:
+            self.manual_skills.off(session_id, name)
+            self.output(f"[skill] inactive: {name}")
+        elif normalized == "clear" and not name:
+            self.manual_skills.clear(session_id)
+            self.output("[skill] cleared")
+        else:
+            raise SkillError(
+                "SKILL_COMMAND_INVALID",
+                "Use /skill use <name>, /skill off <name>, or /skill clear.",
+            )
+
+    def _require_skill_registry(self) -> SkillRegistry:
+        if self.skill_registry is None:
+            raise SkillError("SKILL_UNAVAILABLE", "The Skill system is unavailable.")
+        return self.skill_registry
 
     def _memory(self, argument: str) -> None:
         if self.memory_store is None:
@@ -272,7 +347,10 @@ class InteractiveShell:
         persisted = self.store.save(self.session.record)
         self.session.record = persisted
         job = self.scheduler.submit(
-            persisted, task, self.session.sensitive_values
+            persisted,
+            task,
+            self.session.sensitive_values,
+            self.manual_skills.names(persisted.session_id),
         )
         self.output(
             f"[job] started: {job.id}; session: {job.session_id}"

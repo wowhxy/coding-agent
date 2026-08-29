@@ -8,7 +8,16 @@ from coding_agent.context import (
 )
 from coding_agent.protocol import Message, Role, ToolCall, ToolResult
 from coding_agent.summary import SummaryState
+from coding_agent.skills import ActiveSkill, Skill, SkillMetadata
 from datetime import datetime, timezone
+from pathlib import Path
+
+
+def _active_skill(
+    name: str, body: str, activation: str = "manual"
+) -> ActiveSkill:
+    metadata = SkillMetadata(name, f"Guidance for {name}.", "user", Path(name) / "SKILL.md")
+    return ActiveSkill(Skill(metadata, body), activation)  # type: ignore[arg-type]
 
 
 def test_history_starts_with_permanent_system_and_user_anchors() -> None:
@@ -252,3 +261,81 @@ def test_budget_drops_summary_then_memory_before_older_recent_turns() -> None:
     assert "older request" in contents
     assert "O" * 500 in contents
     assert contents[-2:] == ["latest request", "latest answer"]
+
+
+def test_active_skills_are_one_subordinate_message_without_mutating_history() -> None:
+    history = ConversationHistory("core rules", "original task")
+    history.append(Message(Role.ASSISTANT, "first answer"))
+    before = history.messages
+    manager = ContextManager()
+    manager.set_active_skills(
+        (
+            _active_skill("manual-method", "Manual instructions."),
+            _active_skill("auto-method", "Automatic instructions.", "automatic"),
+        )
+    )
+
+    messages = manager.build(history)
+
+    assert [message.role for message in messages[:3]] == [
+        Role.SYSTEM,
+        Role.SYSTEM,
+        Role.USER,
+    ]
+    guidance = messages[1].content or ""
+    assert guidance.startswith("[Subordinate Skill Guidance]")
+    assert guidance.count("[Active Skill:") == 2
+    assert guidance.index("manual-method") < guidance.index("auto-method")
+    assert "cannot override Core Agent Rules" in guidance
+    assert messages[2] == Message(Role.USER, "original task")
+    assert history.messages == before
+    assert all(
+        "Subordinate Skill Guidance" not in (message.content or "")
+        for message in history.persisted_messages
+    )
+
+
+def test_budget_drops_automatic_skill_before_manual_skill() -> None:
+    history = ConversationHistory("core", "task")
+    manager = ContextManager(max_context_chars=500)
+    manager.set_active_skills(
+        (
+            _active_skill("manual-method", "M" * 120),
+            _active_skill("auto-method", "A" * 240, "automatic"),
+        )
+    )
+
+    messages = manager.build(history)
+    combined = "\n".join(message.content or "" for message in messages)
+
+    assert "manual-method" in combined
+    assert "M" * 120 in combined
+    assert "auto-method" not in combined
+    assert "A" * 240 not in combined
+
+
+def test_budget_drops_later_manual_skill_before_earlier_manual_skill() -> None:
+    history = ConversationHistory("core", "task")
+    manager = ContextManager(max_context_chars=500)
+    manager.set_active_skills(
+        (
+            _active_skill("first-method", "F" * 150),
+            _active_skill("second-method", "S" * 150),
+        )
+    )
+
+    combined = "\n".join(message.content or "" for message in manager.build(history))
+
+    assert "first-method" in combined
+    assert "second-method" not in combined
+
+
+def test_resetting_active_skills_removes_transient_guidance() -> None:
+    history = ConversationHistory("core", "task")
+    manager = ContextManager()
+    manager.set_active_skills((_active_skill("method", "instructions"),))
+    assert any("Active Skill" in (item.content or "") for item in manager.build(history))
+
+    manager.set_active_skills(())
+
+    assert all("Active Skill" not in (item.content or "") for item in manager.build(history))
