@@ -53,6 +53,7 @@ def test_agent_tool_events_map_to_started_and_failed_without_leaking_secret() ->
             "execute_command",
             "builtin",
             "command",
+            tool_call_id="call-1",
         ),
         session_id="111111111111",
         task_id="task-1",
@@ -66,6 +67,7 @@ def test_agent_tool_events_map_to_started_and_failed_without_leaking_secret() ->
             "execute_command",
             "builtin",
             "command",
+            tool_call_id="call-1",
         ),
         session_id="111111111111",
         task_id="task-1",
@@ -86,6 +88,7 @@ def test_agent_tool_events_map_to_started_and_failed_without_leaking_secret() ->
     assert started.source is ActivitySource.COMMAND_VERIFICATION
     assert started.tool_name == "execute_command"
     assert started.plugin_name is None
+    assert started.tool_call_id == failed.tool_call_id == "call-1"
 
 
 def test_plugin_tool_source_is_structured_by_adapter_not_title_parsing() -> None:

@@ -103,6 +103,61 @@ def test_live_tool_updates_in_place_and_subagents_form_a_visible_tree(tmp_path: 
     asyncio.run(scenario())
 
 
+def test_same_step_parallel_tool_events_update_by_tool_call_id(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service = FakeProductService(tmp_path)
+        app = CodingAgentApp(service)
+        async with app.run_test() as pilot:
+            for call_id, target in (("call-a", "a.py"), ("call-b", "b.py")):
+                service.publish(
+                    ProductEvent(
+                        ProductEventKind.TOOL_STARTED,
+                        NOW,
+                        "s",
+                        "task",
+                        1,
+                        "read_file",
+                        target,
+                        ActivityStatus.RUNNING,
+                        source=ActivitySource.BUILTIN_TOOL,
+                        tool_name="read_file",
+                        tool_call_id=call_id,
+                    )
+                )
+            for call_id, target in (("call-a", "a.py done"), ("call-b", "b.py done")):
+                service.publish(
+                    ProductEvent(
+                        ProductEventKind.TOOL_FINISHED,
+                        NOW,
+                        "s",
+                        "task",
+                        1,
+                        "read_file: ok",
+                        target,
+                        ActivityStatus.SUCCEEDED,
+                        source=ActivitySource.BUILTIN_TOOL,
+                        tool_name="read_file",
+                        tool_call_id=call_id,
+                    )
+                )
+            await pilot.pause()
+
+            activity = app.query_one("#activity", ActivityPane)
+            records = {record.key: record for record in activity._records}
+            assert records["tool:call-a"].detail.endswith("a.py done")
+            assert records["tool:call-b"].detail.endswith("b.py done")
+            assert all(
+                record.status is ActivityStatus.SUCCEEDED
+                for record in records.values()
+                if record.key.startswith("tool:call-")
+            )
+            assert "read_file" not in app.query_one(
+                "#conversation", ConversationPane
+            ).plain_text
+
+    asyncio.run(scenario())
+
+
 def test_builtin_and_plugin_tools_have_distinct_visible_sources(tmp_path: Path) -> None:
     async def scenario() -> None:
         service = FakeProductService(tmp_path)

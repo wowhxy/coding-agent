@@ -12,8 +12,10 @@ from .protocol import (
     Role,
     RunResult,
     RunStatus,
+    ToolCall,
     ToolResult,
 )
+from .tool_execution import ToolExecutionScheduler, ToolExecutionStats
 from .tools.registry import ToolRegistry
 from .summary import SummaryManager, SummaryState
 from .skills import ActiveSkill
@@ -55,6 +57,8 @@ class AgentRunner:
         self.run_start_hook = run_start_hook
         self.context_snapshot_sink = context_snapshot_sink
         self._summary_state: SummaryState | None = None
+        self._tool_scheduler = ToolExecutionScheduler(registry)
+        self._tool_execution_stats = ToolExecutionStats()
 
     def run(self, system_prompt: str, original_user_task: str) -> RunResult:
         """Run one task, distinguishing protocol termination from correctness."""
@@ -70,6 +74,7 @@ class AgentRunner:
         """Run one user turn against and append to a canonical history."""
 
         step = 0
+        self._tool_execution_stats = ToolExecutionStats()
         try:
             if self.run_start_hook is not None:
                 self.run_start_hook()
@@ -126,6 +131,21 @@ class AgentRunner:
                     )
 
                 if model_turn.tool_calls:
+                    outcome = self._tool_scheduler.execute(
+                        model_turn.tool_calls,
+                        cancel_check=cancel_check,
+                        start_sink=lambda call: self._emit_tool_requested(step, call),
+                        result_sink=lambda call, result: self._emit_tool_result(
+                            step, call, result
+                        ),
+                    )
+                    self._tool_execution_stats = _combine_tool_execution_stats(
+                        self._tool_execution_stats, outcome.stats
+                    )
+                    if outcome.cancelled:
+                        return self._finish(
+                            RunStatus.CANCELLED, None, step, "run cancelled"
+                        )
                     history.append(
                         Message(
                             Role.ASSISTANT,
@@ -133,39 +153,15 @@ class AgentRunner:
                             model_turn.tool_calls,
                         )
                     )
-                    for call in model_turn.tool_calls:
-                        if cancel_check is not None and cancel_check():
-                            return self._finish(
-                                RunStatus.CANCELLED, None, step, "run cancelled"
-                            )
-                        observation = self.registry.observation_for(call.name)
-                        source, activity_kind = (
-                            observation if observation is not None else (None, None)
-                        )
-                        self._emit(
-                            "tool_requested",
-                            step,
-                            call.name,
-                            tool_name=call.name,
-                            tool_source=source,
-                            activity_kind=activity_kind,
-                        )
-                        result = self.registry.dispatch(call)
+                    for call, result in zip(
+                        model_turn.tool_calls, outcome.results, strict=True
+                    ):
                         history.append(
                             Message(
                                 Role.TOOL,
                                 result.as_message_content(),
                                 tool_call_id=call.id,
                             )
-                        )
-                        self._emit(
-                            "tool_result",
-                            step,
-                            _tool_result_event_message(result),
-                            tool_name=call.name,
-                            tool_source=source,
-                            activity_kind=activity_kind,
-                            tool_ok=result.ok,
                         )
 
                         if result.ok:
@@ -238,19 +234,54 @@ class AgentRunner:
         tool_source: str | None = None,
         activity_kind: str | None = None,
         tool_ok: bool | None = None,
+        tool_call_id: str | None = None,
     ) -> None:
         if self.event_sink is not None:
             self.event_sink(
                 AgentEvent(
-                    kind,
-                    step,
-                    message,
-                    tool_name,
-                    tool_source,
-                    activity_kind,
-                    tool_ok,
+                    kind=kind,
+                    step=step,
+                    message=message,
+                    tool_name=tool_name,
+                    tool_source=tool_source,
+                    activity_kind=activity_kind,
+                    tool_ok=tool_ok,
+                    tool_call_id=tool_call_id,
                 )
             )
+
+    def _emit_tool_requested(self, step: int, call: ToolCall) -> None:
+        observation = self.registry.observation_for(call.name)
+        source, activity_kind = (
+            observation if observation is not None else (None, None)
+        )
+        self._emit(
+            "tool_requested",
+            step,
+            call.name,
+            tool_name=call.name,
+            tool_source=source,
+            activity_kind=activity_kind,
+            tool_call_id=call.id,
+        )
+
+    def _emit_tool_result(
+        self, step: int, call: ToolCall, result: ToolResult
+    ) -> None:
+        observation = self.registry.observation_for(call.name)
+        source, activity_kind = (
+            observation if observation is not None else (None, None)
+        )
+        self._emit(
+            "tool_result",
+            step,
+            _tool_result_event_message(result),
+            tool_name=call.name,
+            tool_source=source,
+            activity_kind=activity_kind,
+            tool_ok=result.ok,
+            tool_call_id=call.id,
+        )
 
     def reset_context_state(self) -> None:
         """Discard session-derived context state when switching sessions."""
@@ -262,6 +293,12 @@ class AgentRunner:
         """Return the current derived summary for session persistence."""
 
         return self._summary_state
+
+    @property
+    def last_tool_execution_stats(self) -> ToolExecutionStats:
+        """Return run-scoped tool scheduling observations."""
+
+        return self._tool_execution_stats
 
     def restore_summary_state(self, state: SummaryState | None) -> None:
         """Restore session-scoped derived context before the next turn."""
@@ -304,3 +341,14 @@ def _tool_result_event_message(result: ToolResult) -> str:
     if result.ok:
         return f"{result.tool_name}: ok"
     return f"{result.tool_name}: error {result.error_code}"
+
+
+def _combine_tool_execution_stats(
+    left: ToolExecutionStats, right: ToolExecutionStats
+) -> ToolExecutionStats:
+    return ToolExecutionStats(
+        tool_calls_total=left.tool_calls_total + right.tool_calls_total,
+        parallel_groups=left.parallel_groups + right.parallel_groups,
+        parallel_calls=left.parallel_calls + right.parallel_calls,
+        serial_calls=left.serial_calls + right.serial_calls,
+    )

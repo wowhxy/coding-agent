@@ -32,6 +32,9 @@ readiness without contacting the provider or printing the key.
   `[plugin:<name>]`, `[subagent]`, `[command]`, `[verify]`, and `[error]`.
   Select a row and press `Enter` for bounded detail. `Ctrl+L` shows or hides the
   entire Activity pane.
+- Independent `list_files`, `search_text`, and `read_file` calls from one model
+  turn may overlap. Activity keeps a separate row per `tool_call_id`; completion
+  is displayed without changing canonical model-feedback order.
 - Changed files show `A`, `M`, or `D` plus additions/deletions. Verification is
   based on actual `execute_command` results, not merely the model's final claim.
 - Continue typing to work in the same persisted session. The most recent session

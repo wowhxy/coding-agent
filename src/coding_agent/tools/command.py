@@ -10,7 +10,7 @@ from typing import Any
 
 from ..context import truncate_text
 from ..protocol import ToolDefinition, ToolResult
-from .registry import RegisteredTool, ToolArgumentError, require_keys
+from .registry import RegisteredTool, ToolArgumentError, ToolEffect, require_keys
 
 
 MAX_COMMAND_OUTPUT_CHARS = 20_000
@@ -137,7 +137,14 @@ def create_execute_command_tool(
             f"command exited with status {completed.returncode}",
         )
 
-    return RegisteredTool(definition, validate, handle, "command")
+    return RegisteredTool(
+        definition,
+        validate,
+        handle,
+        activity_kind="command",
+        effect=ToolEffect.MUTATING,
+        parallel_safe=False,
+    )
 
 
 def _is_positive_int(value: object) -> bool:

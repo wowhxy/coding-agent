@@ -379,9 +379,13 @@ def test_events_report_requested_tool_result_and_final_protocol_status() -> None
     ).run("system", "task")
 
     assert events == [
-        AgentEvent("tool_requested", 1, "inspect", "inspect", "builtin", "tool"),
         AgentEvent(
-            "tool_result", 1, "inspect: ok", "inspect", "builtin", "tool", True
+            "tool_requested", 1, "inspect", "inspect", "builtin", "tool",
+            tool_call_id="c1",
+        ),
+        AgentEvent(
+            "tool_result", 1, "inspect: ok", "inspect", "builtin", "tool", True,
+            "c1",
         ),
         AgentEvent("run_finished", 2, "FINAL_RESPONSE"),
     ]

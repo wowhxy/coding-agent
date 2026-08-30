@@ -698,9 +698,14 @@ def _record_from_event(
         detail = event.detail
         if event.kind is ProductEventKind.TOOL_FINISHED and event.title != name:
             detail = "\n".join(part for part in (event.title, detail) if part)
+        key = (
+            f"tool:{event.tool_call_id}"
+            if event.tool_call_id is not None
+            else f"tool:{event.step}:{name}:{ordinal}"
+        )
         return (
             _ActivityRecord(
-                f"tool:{event.step}:{name}:{ordinal}",
+                key,
                 source,
                 title,
                 detail,
@@ -711,7 +716,10 @@ def _record_from_event(
                 event.parent_id,
                 True,
             ),
-            None,
+            key
+            if event.kind is ProductEventKind.TOOL_FINISHED
+            and event.tool_call_id is not None
+            else None,
         )
     if event.kind is ProductEventKind.SUBAGENT_BATCH:
         key = event.parent_id or f"{event.task_id}:subagents"

@@ -10,7 +10,12 @@ from typing import Any
 
 from coding_agent.plugins import PluginContext
 from coding_agent.protocol import ToolDefinition, ToolResult
-from coding_agent.tools.registry import RegisteredTool, ToolArgumentError, require_keys
+from coding_agent.tools.registry import (
+    RegisteredTool,
+    ToolArgumentError,
+    ToolEffect,
+    require_keys,
+)
 
 
 _COMMAND_TIMEOUT_SECONDS = 10
@@ -41,6 +46,8 @@ def get_tools(context: PluginContext) -> tuple[RegisteredTool, ...]:
             lambda call_id, _arguments: _run_git(
                 call_id, "git_status", workspace, ["status", "--short"]
             ),
+            effect=ToolEffect.READ_ONLY,
+            parallel_safe=True,
         ),
         RegisteredTool(
             ToolDefinition(
@@ -65,6 +72,8 @@ def get_tools(context: PluginContext) -> tuple[RegisteredTool, ...]:
                 workspace,
                 _diff_arguments(arguments),
             ),
+            effect=ToolEffect.READ_ONLY,
+            parallel_safe=True,
         ),
         RegisteredTool(
             ToolDefinition(
@@ -89,6 +98,8 @@ def get_tools(context: PluginContext) -> tuple[RegisteredTool, ...]:
                 workspace,
                 ["log", "--oneline", f"--max-count={arguments['max_count']}"],
             ),
+            effect=ToolEffect.READ_ONLY,
+            parallel_safe=True,
         ),
     )
 

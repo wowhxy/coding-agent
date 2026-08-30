@@ -66,6 +66,7 @@ class ProductEvent:
     tool_name: str | None = None
     plugin_name: str | None = None
     parent_id: str | None = None
+    tool_call_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, ProductEventKind):
@@ -84,7 +85,12 @@ class ProductEvent:
             raise TypeError("event status is invalid")
         if self.source is not None and not isinstance(self.source, ActivitySource):
             raise TypeError("event source is invalid")
-        for value in (self.tool_name, self.plugin_name, self.parent_id):
+        for value in (
+            self.tool_name,
+            self.plugin_name,
+            self.parent_id,
+            self.tool_call_id,
+        ):
             if value is not None and type(value) is not str:
                 raise TypeError("event observation fields must be text or None")
         if type(self.metadata) is not tuple or any(
@@ -154,6 +160,7 @@ def adapt_agent_event(
         source=source,
         tool_name=event.tool_name,
         plugin_name=plugin_name,
+        tool_call_id=event.tool_call_id,
     )
 
 

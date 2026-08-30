@@ -54,6 +54,12 @@ JSON schema, uses a fixed argv with `shell=False`, rejects arbitrary Git
 arguments and unsafe paths, has bounded timeout/output, and exposes no mutation
 command. It is a constrained interface, not a security boundary.
 
+Plugin tools are serial by default. The bundled Git tools explicitly declare
+`READ_ONLY` and `parallel_safe=True`, so one model turn may run them concurrently
+with other explicitly safe reads. Mutating, command, control, and unclassified
+Plugin tools remain serial barriers; names such as `git_status` are never used to
+guess safety.
+
 ## 3. Cleanup
 
 The following removes only the explicit temporary home created in step 1:

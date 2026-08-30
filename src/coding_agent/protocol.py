@@ -118,3 +118,4 @@ class AgentEvent:
     tool_source: str | None = None
     activity_kind: str | None = None
     tool_ok: bool | None = None
+    tool_call_id: str | None = None

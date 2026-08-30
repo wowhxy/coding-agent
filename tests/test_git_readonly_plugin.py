@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
 
 from coding_agent.plugins import PluginManager
 from coding_agent.protocol import ToolCall
-from coding_agent.tools.registry import ToolRegistry
+from coding_agent.tool_execution import ToolExecutionScheduler
+from coding_agent.tools.registry import ToolEffect, ToolRegistry
 
 
 EXAMPLE = Path("examples/plugins/git-readonly")
@@ -214,9 +216,61 @@ def test_plugin_exposes_only_three_read_only_git_tools(tmp_path: Path) -> None:
         "git_diff",
         "git_log",
     ]
+    assert all(
+        manager.registry.execution_metadata_for(name)
+        == (ToolEffect.READ_ONLY, True)
+        for name in ("git_status", "git_diff", "git_log")
+    )
     assert manager.registry.dispatch(
         ToolCall("x", "git_commit", "{}")
     ).error_code == "UNKNOWN_TOOL"
+
+
+def test_explicit_git_plugin_tools_execute_in_one_parallel_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches Plugin metadata being ignored by the scheduler."""
+
+    manager, _workspace = _installed_manager(tmp_path)
+    entered = threading.Barrier(4)
+    release = threading.Event()
+
+    def fake_run(argv: list[str], **_kwargs: object):
+        entered.wait(timeout=2)
+        assert release.wait(timeout=2)
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    def release_all() -> None:
+        entered.wait(timeout=2)
+        release.set()
+
+    coordinator = threading.Thread(target=release_all)
+    coordinator.start()
+    outcome = ToolExecutionScheduler(manager.registry).execute(
+        (
+            ToolCall("status", "git_status", "{}"),
+            ToolCall("diff", "git_diff", "{}"),
+            ToolCall("log", "git_log", "{}"),
+        )
+    )
+    coordinator.join(timeout=2)
+
+    assert not coordinator.is_alive()
+    assert tuple(result.tool_call_id for result in outcome.results) == (
+        "status",
+        "diff",
+        "log",
+    )
+    assert all(result.ok for result in outcome.results)
+    assert outcome.stats.parallel_groups == 1
+    assert outcome.stats.parallel_calls == 3
+    assert all(
+        manager.registry.source_of(name) == "plugin:git-readonly"
+        for name in ("git_status", "git_diff", "git_log")
+    )
 
 
 def test_real_temporary_repository_status_diff_and_log_are_read_only(

@@ -7,7 +7,7 @@ import pytest
 
 from coding_agent.plugins import PluginError, PluginManager
 from coding_agent.protocol import ToolCall
-from coding_agent.tools.registry import ToolRegistry
+from coding_agent.tools.registry import ToolEffect, ToolRegistry
 
 
 def _write_plugin(
@@ -80,6 +80,10 @@ def test_enable_imports_lazily_registers_existing_contract_and_disable_unloads(
     assert enabled.status == "enabled"
     assert sentinel.read_text(encoding="utf-8") == "yes"
     assert manager.registry.source_of("plugin_echo") == "plugin:demo"
+    assert manager.registry.execution_metadata_for("plugin_echo") == (
+        ToolEffect.MUTATING,
+        False,
+    )
     assert result.ok is True
     assert result.output == str(workspace.resolve())
     disabled = manager.disable("demo", persist=False)

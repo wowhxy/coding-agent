@@ -10,7 +10,7 @@ from typing import Any
 from ..context import truncate_text
 from ..protocol import ToolDefinition, ToolResult
 from .paths import WorkspacePathError, WorkspacePaths
-from .registry import RegisteredTool, ToolArgumentError, require_keys
+from .registry import RegisteredTool, ToolArgumentError, ToolEffect, require_keys
 
 
 IGNORED_DIRECTORIES = frozenset(
@@ -72,7 +72,13 @@ def create_list_files_tool(paths: WorkspacePaths) -> RegisteredTool:
             "\n".join(visible_entries),
         )
 
-    return RegisteredTool(definition, validate, handle)
+    return RegisteredTool(
+        definition,
+        validate,
+        handle,
+        effect=ToolEffect.READ_ONLY,
+        parallel_safe=True,
+    )
 
 
 def create_search_text_tool(paths: WorkspacePaths) -> RegisteredTool:
@@ -146,7 +152,13 @@ def create_search_text_tool(paths: WorkspacePaths) -> RegisteredTool:
         output = truncate_text("\n".join(output_lines), MAX_TEXT_OUTPUT_CHARS)
         return ToolResult(call_id, "search_text", True, output)
 
-    return RegisteredTool(definition, validate, handle)
+    return RegisteredTool(
+        definition,
+        validate,
+        handle,
+        effect=ToolEffect.READ_ONLY,
+        parallel_safe=True,
+    )
 
 
 def create_read_file_tool(paths: WorkspacePaths) -> RegisteredTool:
@@ -221,7 +233,13 @@ def create_read_file_tool(paths: WorkspacePaths) -> RegisteredTool:
         output = truncate_text(output, MAX_TEXT_OUTPUT_CHARS)
         return ToolResult(call_id, "read_file", True, output)
 
-    return RegisteredTool(definition, validate, handle)
+    return RegisteredTool(
+        definition,
+        validate,
+        handle,
+        effect=ToolEffect.READ_ONLY,
+        parallel_safe=True,
+    )
 
 
 def create_write_file_tool(paths: WorkspacePaths) -> RegisteredTool:
@@ -298,7 +316,13 @@ def create_write_file_tool(paths: WorkspacePaths) -> RegisteredTool:
             f"{action} file: {paths.display_path(target)}",
         )
 
-    return RegisteredTool(definition, validate, handle)
+    return RegisteredTool(
+        definition,
+        validate,
+        handle,
+        effect=ToolEffect.MUTATING,
+        parallel_safe=False,
+    )
 
 
 def create_replace_in_file_tool(paths: WorkspacePaths) -> RegisteredTool:
@@ -399,7 +423,13 @@ def create_replace_in_file_tool(paths: WorkspacePaths) -> RegisteredTool:
             f"replaced 1 occurrence in: {paths.display_path(target)}",
         )
 
-    return RegisteredTool(definition, validate, handle)
+    return RegisteredTool(
+        definition,
+        validate,
+        handle,
+        effect=ToolEffect.MUTATING,
+        parallel_safe=False,
+    )
 
 
 def _list_entries(paths: WorkspacePaths, target: Path) -> list[str]:

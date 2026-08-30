@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from ..protocol import ToolCall, ToolDefinition, ToolResult
@@ -20,6 +21,14 @@ ToolHandler = Callable[[str, dict[str, Any]], ToolResult]
 _TOOL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
+class ToolEffect(str, Enum):
+    """Execution-side effect classification used by the local scheduler."""
+
+    READ_ONLY = "read_only"
+    MUTATING = "mutating"
+    CONTROL = "control"
+
+
 @dataclass(frozen=True, slots=True)
 class RegisteredTool:
     """A model-facing definition paired with local validation and execution."""
@@ -28,6 +37,8 @@ class RegisteredTool:
     validate: ToolValidator
     handler: ToolHandler
     activity_kind: str = "tool"
+    effect: ToolEffect = ToolEffect.MUTATING
+    parallel_safe: bool = False
 
 
 class ToolRegistry:
@@ -98,6 +109,26 @@ class ToolRegistry:
         """Return last formal metadata for display-only historical projection."""
 
         return self._historical_observations.get(tool_name)
+
+    def is_parallel_safe(self, tool_name: str) -> bool:
+        """Return whether one active tool is explicitly safe for parallel reads."""
+
+        tool = self._tools.get(tool_name)
+        return bool(
+            tool is not None
+            and tool.effect is ToolEffect.READ_ONLY
+            and tool.parallel_safe
+        )
+
+    def execution_metadata_for(
+        self, tool_name: str
+    ) -> tuple[ToolEffect, bool] | None:
+        """Return explicit scheduling metadata for one active tool."""
+
+        tool = self._tools.get(tool_name)
+        if tool is None:
+            return None
+        return tool.effect, tool.parallel_safe
 
     def definitions(self) -> tuple[ToolDefinition, ...]:
         """Return model-facing definitions in deterministic registration order."""
@@ -201,6 +232,12 @@ def _validate_registered_tool(tool: Any) -> None:
         raise TypeError("tool validator and handler must be callable")
     if tool.activity_kind not in {"tool", "command", "control"}:
         raise ValueError("tool activity kind is invalid")
+    if not isinstance(tool.effect, ToolEffect):
+        raise TypeError("tool effect is invalid")
+    if type(tool.parallel_safe) is not bool:
+        raise TypeError("tool parallel_safe flag must be boolean")
+    if tool.parallel_safe and tool.effect is not ToolEffect.READ_ONLY:
+        raise ValueError("only read-only tools can be parallel-safe")
 
 
 def _failure(call: ToolCall, error_code: str, error_message: str) -> ToolResult:

@@ -8,6 +8,7 @@ from coding_agent.protocol import ToolCall, ToolDefinition, ToolResult
 from coding_agent.tools.registry import (
     RegisteredTool,
     ToolArgumentError,
+    ToolEffect,
     ToolRegistry,
     require_keys,
 )
@@ -241,6 +242,25 @@ def test_invalid_activity_kind_is_rejected_before_registration() -> None:
 
     with pytest.raises(ValueError, match="activity kind"):
         registry.register(_echo_tool("bad_kind", activity_kind="display-guess"))
+
+
+@pytest.mark.parametrize("effect", [ToolEffect.MUTATING, ToolEffect.CONTROL])
+def test_only_read_only_tools_may_declare_parallel_safe(
+    effect: ToolEffect,
+) -> None:
+    registry = ToolRegistry()
+    tool = RegisteredTool(
+        ToolDefinition("unsafe", "Unsafe.", {"type": "object"}),
+        _validate_echo,
+        _handle_echo,
+        effect=effect,
+        parallel_safe=True,
+    )
+
+    with pytest.raises(ValueError, match="only read-only"):
+        registry.register(tool)
+
+    assert registry.execution_metadata_for("unsafe") is None
 
 
 @pytest.mark.parametrize(

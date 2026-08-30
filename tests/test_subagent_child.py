@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
+import threading
 from collections.abc import Callable
 
+import coding_agent.subagents.manager as manager_module
 from coding_agent.context import ContextManager
 from coding_agent.model import ModelTransportError
 from coding_agent.protocol import ModelTurn, RunStatus, ToolCall
+from coding_agent.protocol import ToolDefinition, ToolResult
+from coding_agent.tools.registry import RegisteredTool, ToolEffect, ToolRegistry
 from coding_agent.subagents.manager import SubagentManager
 from coding_agent.subagents.models import (
     SubagentContextMode,
@@ -143,3 +148,62 @@ def test_child_cannot_call_parent_write_or_command_tools(tmp_path) -> None:
     assert result.status is RunStatus.FINAL_RESPONSE
     assert not (tmp_path / "created.txt").exists()
 
+
+def test_child_runner_inherits_parallel_read_tool_execution(
+    tmp_path, monkeypatch
+) -> None:
+    """Catches child runtimes bypassing the shared AgentRunner scheduler."""
+
+    first_started = threading.Event()
+    second_started = threading.Event()
+
+    def handler(call_id: str, _arguments: dict[str, object]) -> ToolResult:
+        if call_id == "a":
+            first_started.set()
+            overlap = second_started.wait(timeout=1)
+        else:
+            second_started.set()
+            overlap = first_started.wait(timeout=1)
+        return ToolResult(call_id, "read_data", True, str(overlap))
+
+    registry = ToolRegistry()
+    registry.register_many(
+        (
+            RegisteredTool(
+                ToolDefinition("read_data", "Read.", {"type": "object"}),
+                lambda arguments: arguments,
+                handler,
+                effect=ToolEffect.READ_ONLY,
+                parallel_safe=True,
+            ),
+        ),
+        source="builtin",
+    )
+    monkeypatch.setattr(
+        manager_module, "build_read_only_registry", lambda _workspace: registry
+    )
+    create_client, clients = _client_factory(
+        [
+            [
+                ModelTurn(
+                    tool_calls=(
+                        ToolCall("a", "read_data", "{}"),
+                        ToolCall("b", "read_data", "{}"),
+                    )
+                ),
+                ModelTurn("parallel inspection complete"),
+            ]
+        ]
+    )
+
+    result = SubagentManager(tmp_path, create_client).run_child(_task())
+
+    assert result.status is RunStatus.FINAL_RESPONSE
+    tool_feedback = tuple(
+        message
+        for message in clients[0].calls[1][0]
+        if message.tool_call_id in {"a", "b"}
+    )
+    assert tuple(
+        json.loads(message.content or "{}")["output"] for message in tool_feedback
+    ) == ("True", "True")

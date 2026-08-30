@@ -9,6 +9,7 @@ from ..protocol import ToolDefinition, ToolResult
 from ..tools.registry import (
     RegisteredTool,
     ToolArgumentError,
+    ToolEffect,
     require_keys,
 )
 from .manager import SubagentManager
@@ -139,4 +140,11 @@ def create_delegate_tasks_tool(manager: SubagentManager) -> RegisteredTool:
         )
         return ToolResult(call_id, "delegate_tasks", True, output)
 
-    return RegisteredTool(definition, validate, handle, "control")
+    return RegisteredTool(
+        definition,
+        validate,
+        handle,
+        activity_kind="control",
+        effect=ToolEffect.CONTROL,
+        parallel_safe=False,
+    )
