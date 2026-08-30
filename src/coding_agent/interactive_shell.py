@@ -6,7 +6,8 @@ from collections.abc import Callable
 
 from .interactive import InteractiveSession, _redact_text
 from .memory import WorkspaceMemoryStore
-from .memory_candidate import MemoryCandidateExtractor, is_safe_candidate
+from .memory_candidate import MemoryCandidateExtractor
+from .memory_policy import MemoryAction, MemoryAutoManager
 from .protocol import Message, RunStatus
 from .plugins import PluginError, PluginManager
 from .recall import RecallEntry, RecallService, should_automatic_recall
@@ -408,52 +409,18 @@ class InteractiveShell:
     def _capture_candidates(self, turn_messages: tuple[Message, ...]) -> None:
         if self.candidate_extractor is None or self.memory_store is None:
             return
-        candidates = self.candidate_extractor.extract(turn_messages)
-        for candidate in candidates:
-            if not is_safe_candidate(candidate, self.session.sensitive_values):
-                continue
-            match = self.memory_store.match(
-                self.session.record.workspace,
-                candidate.content,
-                candidate.kind,
-                key=candidate.key,
-            )
-            if match.status in {"exact_duplicate", "normalized_duplicate"}:
-                continue
-            action = "replace" if match.status == "conflict" else "save"
-            try:
-                answer = self.input_reader(
-                    f"[memory candidate] {action} ({candidate.kind}) "
-                    f"{candidate.text} [y/N] "
-                )
-            except EOFError:
-                return
-            if answer.strip().casefold() != "y":
-                continue
-            try:
-                if match.status == "conflict" and match.existing is not None:
-                    item = self.memory_store.replace(
-                        self.session.record.workspace,
-                        match.existing.id,
-                        candidate.content,
-                        self.session.sensitive_values,
-                        kind=candidate.kind,
-                        source="confirmed_candidate",
-                        key=candidate.key,
-                    )
-                else:
-                    item = self.memory_store.add(
-                        self.session.record.workspace,
-                        candidate.content,
-                        self.session.sensitive_values,
-                        kind=candidate.kind,
-                        source="confirmed_candidate",
-                        key=candidate.key,
-                    )
-                self._refresh_workspace_memory()
-                self.output(f"[memory] added: {item.id}")
-            except SessionError as error:
-                self._print_error(error)
+        report = MemoryAutoManager(
+            self.candidate_extractor,
+            self.memory_store,
+            self.session.sensitive_values,
+        ).process(self.session.record.workspace, turn_messages)
+        if report.changes:
+            self._refresh_workspace_memory()
+        for change in report.changes:
+            verb = "added" if change.action is MemoryAction.ADD else "updated"
+            self.output(f"[memory] {verb}: {change.item.key}")
+        if report.diagnostic is not None:
+            self.output(f"[memory warning] {report.diagnostic}")
 
     def _refresh_workspace_memory(self) -> None:
         if self.memory_store is None:

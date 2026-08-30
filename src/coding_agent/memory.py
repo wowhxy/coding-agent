@@ -59,7 +59,17 @@ class MemoryMatch:
 
 
 _KINDS = frozenset({"command", "constraint", "convention", "architecture", "fact"})
-_SOURCES = frozenset({"user", "observed", "confirmed_candidate"})
+_SOURCES = frozenset(
+    {
+        "user",
+        "observed",
+        "confirmed_candidate",
+        "USER_EXPLICIT",
+        "CONFIG_OBSERVED",
+        "TOOL_VERIFIED",
+        "MODEL_INFERRED",
+    }
+)
 
 
 class WorkspaceMemoryStore:
@@ -87,7 +97,7 @@ class WorkspaceMemoryStore:
         sensitive_values: tuple[str, ...],
         *,
         kind: str = "fact",
-        source: str = "user",
+        source: str = "USER_EXPLICIT",
         key: str | None = None,
     ) -> MemoryItem:
         canonical = self._workspace(workspace)

@@ -5,7 +5,6 @@ from pathlib import Path
 
 from textual.widgets import Button, Markdown, Static
 
-from coding_agent.application.state import MemoryCandidateView
 from coding_agent.tui.app import CodingAgentApp
 from coding_agent.tui.screens import (
     ConfirmScreen,
@@ -73,7 +72,9 @@ def test_destructive_session_and_memory_clear_require_confirmation(tmp_path: Pat
     asyncio.run(scenario())
 
 
-def test_rename_help_and_candidate_confirmation_are_direct(tmp_path: Path) -> None:
+def test_rename_and_help_are_direct_without_memory_candidate_dialog(
+    tmp_path: Path,
+) -> None:
     async def scenario() -> None:
         service = FakeProductService(tmp_path)
         app = CodingAgentApp(service)
@@ -85,14 +86,9 @@ def test_rename_help_and_candidate_confirmation_are_direct(tmp_path: Path) -> No
             assert "Ctrl+Enter" in app.screen.query_one(Markdown).source
             await pilot.press("escape")
             assert not isinstance(app.screen, HelpScreen)
-            service._candidates = (
-                MemoryCandidateView("candidate-1", "test.command", "pytest -q", "command", "observed", "save"),
-            )
             await _command(app, pilot, "ordinary task")
             await pilot.pause(0.1)
-            assert isinstance(app.screen, ConfirmScreen)
-            await pilot.click("#confirm")
-            assert service.candidate_decisions == [("candidate-1", True)]
+            assert not isinstance(app.screen, ConfirmScreen)
 
     asyncio.run(scenario())
 

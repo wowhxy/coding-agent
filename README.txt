@@ -12,7 +12,7 @@ TUI：Ctrl+Enter提交，Ctrl+C取消；coding-agent doctor。
 交互：默认恢复当前 workspace 的最近 session；--new-session 新建；--resume-session <ID> 恢复。/exit 或输入阶段 Ctrl+C 正常退出；运行阶段 Ctrl+C 丢弃未完成当前轮次。无已提交轮次的新会话不留下 session 文件。命令：/recall <query> /memory。
 pointer/catalog/可重建FTS5；History在JSON。
 
-Context/Memory：渐进压缩、增量摘要；知识经确认后保存；workspace 隔离。Skill：SKILL.md；/skills、/skill use；automatic。Plugin：/plugins、/plugin enable、/plugin disable；不是安全沙箱。
+Context/Memory：渐进压缩、增量摘要；不再经确认后保存；automatic；workspace 隔离。Skill：SKILL.md；/skills /skill use。Plugin：/plugins /plugin enable /plugin disable；不是安全沙箱。
 
 Subagent：delegate_tasks 单进程只读；parent 是单写者。
 

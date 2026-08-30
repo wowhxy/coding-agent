@@ -21,11 +21,7 @@ from coding_agent.model import ModelTransportError
 from coding_agent.protocol import Message, ModelTurn, RunStatus, ToolCall, ToolDefinition
 from coding_agent.session import SessionError
 from coding_agent.tui.app import CodingAgentApp
-from coding_agent.tui.screens import (
-    ConfirmScreen,
-    PluginManagementScreen,
-    SkillManagementScreen,
-)
+from coding_agent.tui.screens import PluginManagementScreen, SkillManagementScreen
 from coding_agent.tui.widgets import ActivityPane, Composer, ConversationPane
 from tests.fakes import FakeModelClient
 
@@ -83,7 +79,12 @@ class StreamingParentClient:
                             "key": "test.command",
                             "content": _command("-m", "pytest", "-q"),
                             "kind": "command",
-                            "source": "observed",
+                            "source": "TOOL_VERIFIED",
+                            "evidence": {
+                                "tool_name": "execute_command",
+                                "command": _command("-m", "pytest", "-q"),
+                                "success": True,
+                            },
                         }
                     ]
                 }
@@ -249,9 +250,8 @@ def test_real_product_repairs_with_tools_three_subagents_and_resumes(tmp_path: P
             assert "subagent-1" not in pane.plain_text
             assert "git_status" not in pane.plain_text
             assert composer.display and pane.display
-            assert isinstance(app.screen, ConfirmScreen)
-            await pilot.click("#confirm")
             assert service.snapshot().status.memory_count == 1
+            assert "[memory] Added test.command" in activity.plain_text
             await _submit_ui_command(app, pilot, "/skills")
             await pilot.click("#resource-secondary")
             await pilot.click("#resource-close")

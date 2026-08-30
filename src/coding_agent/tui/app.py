@@ -119,6 +119,7 @@ class CodingAgentApp(App[None]):
         self._input_history: list[str] = []
         self._history_index = 0
         self._last_transient_error: ProductEvent | None = None
+        self._memory_task_events: list[ProductEvent] = []
         self._phase = "Ready"
 
     def compose(self) -> ComposeResult:
@@ -161,12 +162,13 @@ class CodingAgentApp(App[None]):
         composer = self.query_one("#composer", Composer)
         composer.disabled = False
         self._refresh_all(self.service.snapshot())
+        activity = self.query_one("#activity", ActivityPane)
+        for event in self._memory_task_events:
+            activity.apply_event(event)
+        self._memory_task_events.clear()
         if self._last_transient_error is not None:
-            self.query_one("#activity", ActivityPane).apply_event(
-                self._last_transient_error
-            )
+            activity.apply_event(self._last_transient_error)
             self._last_transient_error = None
-        self._offer_pending_candidate()
         composer.focus()
 
     @on(TextArea.Changed, "#composer")
@@ -401,7 +403,13 @@ class CodingAgentApp(App[None]):
         self.query_one("#activity", ActivityPane).apply_event(event)
         if event.kind is ProductEventKind.TASK_STARTED:
             self._last_transient_error = None
+            self._memory_task_events.clear()
             self._running_task = True
+        elif event.kind in {
+            ProductEventKind.MEMORY_ADDED,
+            ProductEventKind.MEMORY_UPDATED,
+        }:
+            self._memory_task_events.append(event)
         elif event.kind in {
             ProductEventKind.FINAL_RESPONSE,
             ProductEventKind.TASK_FAILED,
@@ -653,30 +661,6 @@ class CodingAgentApp(App[None]):
         if confirmed:
             self.service.cancel_task()
             self.exit()
-
-    def _offer_pending_candidate(self) -> None:
-        try:
-            candidates = self.service.pending_candidates()
-        except Exception:
-            return
-        if not candidates:
-            return
-        candidate = candidates[0]
-        question = (
-            f"Remember {candidate.key} = {candidate.content} "
-            f"for this workspace?"
-        )
-        self.push_screen(
-            ConfirmScreen(question),
-            lambda accepted: self._candidate_decided(candidate.id, accepted),
-        )
-
-    def _candidate_decided(self, candidate_id: str, accepted: bool) -> None:
-        try:
-            self.service.confirm_candidate(candidate_id, accept=accepted)
-            self._refresh_all(self.service.snapshot())
-        except Exception as exc:
-            self.notify(f"{type(exc).__name__}: memory decision failed", severity="error")
 
     def _refresh_all(self, snapshot: ProductSnapshot) -> None:
         self._refresh_session_chrome(snapshot)

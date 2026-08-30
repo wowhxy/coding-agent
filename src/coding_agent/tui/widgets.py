@@ -524,7 +524,6 @@ class ActivityPane(Vertical):
             ProductEventKind.TEXT_DELTA,
             ProductEventKind.FINAL_RESPONSE,
             ProductEventKind.SESSION_CHANGED,
-            ProductEventKind.MEMORY_CANDIDATE,
             ProductEventKind.RECALL_RESULT,
             ProductEventKind.NOTICE,
         }:
@@ -785,6 +784,26 @@ def _record_from_event(
             _ActivityRecord(
                 f"changes:{ordinal}", source, f"[change] {event.title}", event.detail,
                 status, live=True,
+            ),
+            None,
+        )
+    if event.kind in {
+        ProductEventKind.MEMORY_ADDED,
+        ProductEventKind.MEMORY_UPDATED,
+    }:
+        verb = (
+            "Added"
+            if event.kind is ProductEventKind.MEMORY_ADDED
+            else "Updated"
+        )
+        return (
+            _ActivityRecord(
+                f"memory:{ordinal}",
+                ActivitySource.TASK,
+                f"[memory] {verb} {event.title}",
+                "",
+                status,
+                live=True,
             ),
             None,
         )

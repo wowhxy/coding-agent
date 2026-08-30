@@ -17,7 +17,6 @@ from coding_agent.application.state import (
     ChangeView,
     ConversationItem,
     ConversationKind,
-    MemoryCandidateView,
     MemoryView,
     PluginView,
     ProductSnapshot,
@@ -53,7 +52,6 @@ class FakeProductService:
         self.plugin_actions: list[tuple[str, str]] = []
         self.recall_queries: list[str] = []
         self.session_search_queries: list[str] = []
-        self.candidate_decisions: list[tuple[str, bool]] = []
         self.blocking = blocking
         self.started = threading.Event()
         self.release = threading.Event()
@@ -75,7 +73,6 @@ class FakeProductService:
         self._plugins = (
             PluginView("git-readonly", "1.0.0", "Read-only Git tools.", "disabled", False),
         )
-        self._candidates: tuple[MemoryCandidateView, ...] = ()
         self._state = AgentState.READY
 
     def subscribe(self, sink):
@@ -260,12 +257,6 @@ class FakeProductService:
         self.recall_queries.append(query)
         return (RecallView("222222222222", "assistant", "parser failed earlier", 3, NOW, 10),)
 
-    def pending_candidates(self) -> tuple[MemoryCandidateView, ...]:
-        return self._candidates
-
-    def confirm_candidate(self, candidate_id: str, *, accept: bool):
-        self.candidate_decisions.append((candidate_id, accept))
-        self._candidates = ()
         return None
 
     def _emit(

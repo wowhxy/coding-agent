@@ -225,27 +225,38 @@ def test_plugin_management_preserves_trust_warning(tmp_path: Path) -> None:
     service.close()
 
 
-def test_memory_candidate_requires_explicit_confirmation(tmp_path: Path) -> None:
+def test_memory_candidate_is_automatically_persisted_without_confirmation(
+    tmp_path: Path,
+) -> None:
+    task = "From now on always run pytest -q before finishing."
     candidate_json = json.dumps(
-        {"candidates": [{"key": "test.command", "content": "pytest -q", "kind": "command", "source": "observed"}]}
+        {
+            "candidates": [
+                {
+                    "key": "test.command",
+                    "content": "pytest -q",
+                    "kind": "command",
+                    "source": "USER_EXPLICIT",
+                    "evidence": {"user_quote": task},
+                }
+            ]
+        }
     )
     service, _workspace, _home = _create(
         tmp_path,
         [
-            ModelTurn(tool_calls=(ToolCall("c1", "execute_command", '{"command":"python -c \\"print(1)\\""}'),)),
             ModelTurn("done"),
             ModelTurn(candidate_json),
         ],
     )
+    events = []
+    service.subscribe(events.append)
 
-    service.submit_task("inspect")
-    candidates = service.pending_candidates()
-    assert len(candidates) == 1
-    assert service.list_memory() == ()
-    saved = service.confirm_candidate(candidates[0].id, accept=True)
-    assert saved is not None
+    service.submit_task(task)
+
     assert service.list_memory()[0].key == "test.command"
-    assert service.pending_candidates() == ()
+    assert service.list_memory()[0].source == "USER_EXPLICIT"
+    assert any(event.kind.value == "memory_added" for event in events)
     service.close()
 
 

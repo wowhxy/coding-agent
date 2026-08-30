@@ -86,6 +86,15 @@ Typing `/` opens completion suggestions. Use `Up`/`Down` to choose and `Tab` to
 accept without submitting. The `Ctrl+P` palette provides the common Session,
 Skills, Plugins, Memory, Recall, Activity, pane-resizing, and Help actions.
 
+After a successful foreground task, the model may propose at most five durable
+workspace-memory candidates in one no-tools control-plane call. A deterministic
+local policy checks each proposal against the current user statement or actual
+successful file/config/command evidence, filters secrets and transient details,
+then performs ADD, UPDATE, or IGNORE. There is no candidate approval dialog.
+Successful additions and updates appear as lightweight Activity rows. Manual
+`/memory add`, delete, and clear remain available, and memory never crosses a
+workspace boundary.
+
 `/skills` and `/plugins` open interactive managers. Skills show scope and
 manual/automatic/inactive status and can be activated or deactivated. Plugins
 show version, status, and description and can be enabled or disabled. Plugin

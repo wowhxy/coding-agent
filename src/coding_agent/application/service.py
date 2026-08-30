@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,7 +13,8 @@ from ..context import ContextManager, ConversationHistory
 from ..context_policy import ContextPolicy
 from ..interactive import InteractiveSession
 from ..memory import MemoryItem, WorkspaceMemoryStore
-from ..memory_candidate import MemoryCandidate, MemoryCandidateExtractor, is_safe_candidate
+from ..memory_candidate import MemoryCandidateExtractor
+from ..memory_policy import MemoryAction, MemoryAutoManager
 from ..model import ModelClient
 from ..plugins import PluginInfo, PluginManager
 from ..protocol import AgentEvent, Message, Role, RunResult, RunStatus
@@ -48,7 +48,6 @@ from .state import (
     AgentState,
     ConversationItem,
     ConversationKind,
-    MemoryCandidateView,
     MemoryView,
     PluginView,
     ProductSnapshot,
@@ -62,12 +61,6 @@ from .state import (
 ClientFactory = Callable[[str, str, str, str], ModelClient]
 EventSubscriber = Callable[[ProductEvent], None]
 _PLUGIN_WARNING = "Executable plugins run as trusted local code."
-
-
-@dataclass(slots=True)
-class _PendingCandidate:
-    view: MemoryCandidateView
-    candidate: MemoryCandidate
 
 
 class CodingAgentService:
@@ -103,8 +96,6 @@ class CodingAgentService:
         self._changes = ()
         self._verifications = ()
         self._pending_recall: tuple[RecallEntry, ...] = ()
-        self._pending_candidates: dict[str, _PendingCandidate] = {}
-        self._candidate_number = 0
 
         self.store = JsonSessionStore(self.session_home)
         self.memory_store = WorkspaceMemoryStore(self.session_home)
@@ -180,6 +171,11 @@ class CodingAgentService:
                 self.skill_registry, SkillSelector(self._client)
             )
             self._candidate_extractor = MemoryCandidateExtractor(self._client)
+            self._memory_manager = MemoryAutoManager(
+                self._candidate_extractor,
+                self.memory_store,
+                (config.api_key,),
+            )
         except BaseException:
             if self._plugin_manager is not None:
                 self._plugin_manager.close()
@@ -579,49 +575,6 @@ class CodingAgentService:
         )
         return tuple(_recall_view(item) for item in entries)
 
-    def pending_candidates(self) -> tuple[MemoryCandidateView, ...]:
-        return tuple(item.view for item in self._pending_candidates.values())
-
-    def confirm_candidate(
-        self, candidate_id: str, *, accept: bool
-    ) -> MemoryView | None:
-        self._require_idle()
-        pending = self._pending_candidates.pop(candidate_id, None)
-        if pending is None:
-            raise SessionError("MEMORY_CANDIDATE_NOT_FOUND", "memory candidate was not found")
-        if not accept:
-            self._emit(ProductEventKind.STATE_CHANGED, "Memory candidate rejected")
-            return None
-        candidate = pending.candidate
-        match = self.memory_store.match(
-            self.config.workspace,
-            candidate.content,
-            candidate.kind,
-            key=candidate.key,
-        )
-        if match.status == "conflict" and match.existing is not None:
-            item = self.memory_store.replace(
-                self.config.workspace,
-                match.existing.id,
-                candidate.content,
-                (self.config.api_key,),
-                kind=candidate.kind,
-                source="confirmed_candidate",
-                key=candidate.key,
-            )
-        else:
-            item = self.memory_store.add(
-                self.config.workspace,
-                candidate.content,
-                (self.config.api_key,),
-                kind=candidate.kind,
-                source="confirmed_candidate",
-                key=candidate.key,
-            )
-        self._refresh_memory()
-        self._emit(ProductEventKind.STATE_CHANGED, "Memory candidate saved")
-        return _memory_view(item)
-
     def close(self) -> None:
         with self._lock:
             if self._closed or self._resources_closed:
@@ -676,37 +629,23 @@ class CodingAgentService:
     ) -> None:
         if status is not RunStatus.FINAL_RESPONSE:
             return
-        for candidate in self._candidate_extractor.extract(turn_messages):
-            if not is_safe_candidate(candidate, (self.config.api_key,)):
-                continue
-            match = self.memory_store.match(
-                self.config.workspace,
-                candidate.content,
-                candidate.kind,
-                key=candidate.key,
-            )
-            if match.status in {"exact_duplicate", "normalized_duplicate"}:
-                continue
-            self._candidate_number += 1
-            identifier = f"candidate-{self._candidate_number}"
-            view = MemoryCandidateView(
-                identifier,
-                candidate.key,
-                candidate.content,
-                candidate.kind,
-                candidate.source,
-                "replace" if match.status == "conflict" else "save",
-            )
-            self._pending_candidates[identifier] = _PendingCandidate(view, candidate)
+        report = self._memory_manager.process(self.config.workspace, turn_messages)
+        if report.changes:
+            self._refresh_memory()
+        for change in report.changes:
             self._emit(
-                ProductEventKind.MEMORY_CANDIDATE,
-                f"{view.key} = {view.content}",
+                ProductEventKind.MEMORY_ADDED
+                if change.action is MemoryAction.ADD
+                else ProductEventKind.MEMORY_UPDATED,
+                f"{change.item.key} = {change.item.content}",
+                ActivityStatus.SUCCEEDED,
             )
+        if report.diagnostic is not None:
+            self._emit(ProductEventKind.NOTICE, report.diagnostic)
 
     def _activate_session(self, record: SessionRecord) -> None:
         self._interactive.activate(record)
         self._pending_recall = ()
-        self._pending_candidates.clear()
         self._changes = ()
         self._verifications = ()
         self._active_skill_names = self.manual_skills.names(record.session_id)

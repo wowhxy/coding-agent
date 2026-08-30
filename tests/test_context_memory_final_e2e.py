@@ -14,7 +14,7 @@ from coding_agent.context_policy import ContextPolicy
 from coding_agent.interactive import InteractiveSession
 from coding_agent.interactive_shell import InteractiveShell
 from coding_agent.memory import WorkspaceMemoryStore
-from coding_agent.memory_candidate import MemoryCandidate
+from coding_agent.memory_candidate import MemoryCandidate, MemoryEvidence
 from coding_agent.model import ModelTransportError
 from coding_agent.protocol import (
     Message,
@@ -79,16 +79,30 @@ def _tool_turn(
 
 
 class _FourCandidates:
-    def extract(self, _messages: tuple[Message, ...]):
+    last_diagnostic = None
+
+    def extract(self, messages: tuple[Message, ...]):
+        quote = messages[0].content
+        assert quote is not None
         return (
-            MemoryCandidate("build.system", "cmake", "architecture", "observed"),
-            MemoryCandidate("test.command", "ctest", "command", "observed"),
-            MemoryCandidate("source.root", "src", "architecture", "observed"),
+            MemoryCandidate(
+                "build.system", "cmake", "architecture", "USER_EXPLICIT",
+                MemoryEvidence(user_quote=quote),
+            ),
+            MemoryCandidate(
+                "test.command", "ctest", "command", "USER_EXPLICIT",
+                MemoryEvidence(user_quote=quote),
+            ),
+            MemoryCandidate(
+                "source.root", "src", "architecture", "USER_EXPLICIT",
+                MemoryEvidence(user_quote=quote),
+            ),
             MemoryCandidate(
                 "constraint.vendor",
                 "do not modify vendor/",
                 "constraint",
-                "user",
+                "USER_EXPLICIT",
+                MemoryEvidence(user_quote=quote),
             ),
         )
 
@@ -124,15 +138,19 @@ def test_context_memory_final_scenarios_a_to_f(tmp_path: Path) -> None:
         home, clock=lambda: NOW, id_generator=memory_ids.__next__
     )
 
-    # Scenario A: four candidates require explicit confirmation, then a long
-    # canonical session exercises L1-L4 through a real deterministic AgentRunner.
+    # Scenario A: four evidence-backed candidates persist without a dialog, then
+    # a long canonical session exercises L1-L4 through a deterministic AgentRunner.
     session_a = sessions.create_session(cpp_workspace, "fake", "fake-model")
     discovery_runner = AgentRunner(
         FakeModelClient([ModelTurn("project inspected")]),
         ToolRegistry(),
         ContextManager(),
     )
-    candidate_inputs = iter(("inspect project", "y", "y", "y", "y", "/exit"))
+    durable_task = (
+        "This project uses cmake, always runs ctest, keeps sources in src, "
+        "and must not modify vendor/."
+    )
+    candidate_inputs = iter((durable_task, "/exit"))
     assert InteractiveShell(
         InteractiveSession(
             discovery_runner,

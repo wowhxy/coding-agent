@@ -10,6 +10,7 @@ from coding_agent.memory import MemoryMatch, WorkspaceMemoryStore
 from coding_agent.memory_candidate import (
     MemoryCandidate,
     MemoryCandidateExtractor,
+    MemoryEvidence,
     is_safe_candidate,
 )
 from coding_agent.protocol import Message, ModelTurn, Role
@@ -143,11 +144,14 @@ def test_candidate_uses_key_content_schema_and_rejects_invalid_or_secret_values(
             ModelTurn(
                 '{"candidates":['
                 '{"key":"test.command","content":"ctest",'
-                '"kind":"command","source":"observed"},'
+                '"kind":"command","source":"TOOL_VERIFIED",'
+                '"evidence":{"tool_name":"execute_command","command":"ctest",'
+                '"success":true}},'
                 '{"key":"Bad Key","content":"ignored",'
-                '"kind":"fact","source":"observed"},'
+                '"kind":"fact","source":"MODEL_INFERRED","evidence":{}},'
                 '{"key":"auth.token","content":"token=abcdefghijklmnop",'
-                '"kind":"fact","source":"observed"}'
+                '"kind":"fact","source":"MODEL_INFERRED","evidence":{}'
+                '}'
                 "]}"
             )
         ]
@@ -158,11 +162,17 @@ def test_candidate_uses_key_content_schema_and_rejects_invalid_or_secret_values(
     )
 
     assert candidates == (
-        MemoryCandidate("test.command", "ctest", "command", "observed"),
-        MemoryCandidate("auth.token", "token=abcdefghijklmnop", "fact", "observed"),
+        MemoryCandidate(
+            "test.command",
+            "ctest",
+            "command",
+            "TOOL_VERIFIED",
+            MemoryEvidence(
+                tool_name="execute_command", command="ctest", success=True
+            ),
+        ),
     )
     assert is_safe_candidate(candidates[0], ()) is True
-    assert is_safe_candidate(candidates[1], ()) is False
 
 
 def test_schema_v3_duplicate_keys_and_oversized_total_are_corrupt(

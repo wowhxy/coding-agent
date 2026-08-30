@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,7 +104,8 @@ def test_memory_summary_restart_new_session_and_workspace_isolation_offline(
         agent_model,
         FakeModelClient([ModelTurn("persistent old-work summary")]),
     )
-    inputs = iter(("inspect main.cpp", "y", "/exit"))
+    task = "Always build this project with cmake --build build; inspect main.cpp"
+    inputs = iter((task, "/exit"))
     shell = InteractiveShell(
         InteractiveSession(
             runner,
@@ -121,10 +123,20 @@ def test_memory_summary_restart_new_session_and_workspace_isolation_offline(
         candidate_extractor=MemoryCandidateExtractor(
             FakeModelClient(
                 [
-                        ModelTurn(
-                            '{"candidates":[{"key":"build.command",'
-                            '"content":"cmake --build build",'
-                            '"kind":"command","source":"observed"}]}'
+                    ModelTurn(
+                        json.dumps(
+                            {
+                                "candidates": [
+                                    {
+                                        "key": "build.command",
+                                        "content": "cmake --build build",
+                                        "kind": "command",
+                                        "source": "USER_EXPLICIT",
+                                        "evidence": {"user_quote": task},
+                                    }
+                                ]
+                            }
+                        )
                     )
                 ]
             )
@@ -135,7 +147,7 @@ def test_memory_summary_restart_new_session_and_workspace_isolation_offline(
     persisted = sessions.load_session(first.session_id, workspace)
     assert persisted.summary is not None
     assert persisted.summary.text == "persistent old-work summary"
-    assert memories.list(workspace)[0].source == "confirmed_candidate"
+    assert memories.list(workspace)[0].source == "USER_EXPLICIT"
     assert any(
         message.role is Role.TOOL and "int main()" in (message.content or "")
         for message in agent_model.calls[1][0]

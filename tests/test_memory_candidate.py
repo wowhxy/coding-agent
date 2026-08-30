@@ -7,8 +7,20 @@ from coding_agent.context import ConversationHistory
 from coding_agent.interactive import InteractiveSession
 from coding_agent.interactive_shell import InteractiveShell
 from coding_agent.memory import WorkspaceMemoryStore
-from coding_agent.memory_candidate import MemoryCandidate, MemoryCandidateExtractor
-from coding_agent.protocol import Message, ModelTurn, Role, RunResult, RunStatus, ToolCall
+from coding_agent.memory_candidate import (
+    MemoryCandidate,
+    MemoryCandidateExtractor,
+    MemoryEvidence,
+)
+from coding_agent.protocol import (
+    Message,
+    ModelTurn,
+    Role,
+    RunResult,
+    RunStatus,
+    ToolCall,
+    ToolResult,
+)
 from coding_agent.session_store import JsonSessionStore
 from fakes import FakeModelClient
 
@@ -20,9 +32,11 @@ def test_extractor_only_calls_model_for_tool_evidence_or_long_term_constraint() 
     model = FakeModelClient(
         [
             ModelTurn(
-                '{"candidates":[{"key":"test.command",'
-                '"content":"Run pytest before finishing",'
-                '"kind":"command","source":"observed"}]}'
+                '{"candidates":[{"key":"project.docs",'
+                '"content":"README",'
+                '"kind":"fact","source":"CONFIG_OBSERVED",'
+                '"evidence":{"tool_name":"read_file","path":"README",'
+                '"success":true}}]}'
             )
         ]
     )
@@ -36,14 +50,22 @@ def test_extractor_only_calls_model_for_tool_evidence_or_long_term_constraint() 
                 Role.ASSISTANT,
                 tool_calls=(ToolCall("call-1", "read_file", '{"path":"README"}'),),
             ),
-            Message(Role.TOOL, "project docs", tool_call_id="call-1"),
+            Message(
+                Role.TOOL,
+                ToolResult("call-1", "read_file", True, "project docs").as_message_content(),
+                tool_call_id="call-1",
+            ),
             Message(Role.ASSISTANT, "done"),
         )
     )
 
     assert candidates == (
         MemoryCandidate(
-            "test.command", "Run pytest before finishing", "command", "observed"
+            "project.docs",
+            "README",
+            "fact",
+            "CONFIG_OBSERVED",
+            MemoryEvidence(tool_name="read_file", path="README", success=True),
         ),
     )
     assert len(model.calls) == 1
@@ -57,7 +79,8 @@ def test_extractor_is_bounded_and_failures_are_silent() -> None:
                 "key": f"convention.item-{index}",
                 "content": f"Stable convention {index}",
                 "kind": "convention",
-                "source": "user",
+                "source": "USER_EXPLICIT",
+                "evidence": {"user_quote": "from now on always run tests"},
             }
             for index in range(6)
         ]
@@ -75,10 +98,13 @@ def test_extractor_is_bounded_and_failures_are_silent() -> None:
     extractor = MemoryCandidateExtractor(model)
     eligible = (Message(Role.USER, "from now on always run tests"),)
 
-    assert len(extractor.extract(eligible)) == 4
+    assert len(extractor.extract(eligible)) == 5
     assert extractor.extract(eligible) == ()
+    assert extractor.last_diagnostic == "memory candidate response malformed"
     assert extractor.extract(eligible) == ()
+    assert extractor.last_diagnostic == "memory candidate response malformed"
     assert extractor.extract(eligible) == ()
+    assert extractor.last_diagnostic == "memory candidate extraction failed"
 
 
 def test_extractor_rejects_transient_or_unsafe_candidate_shapes() -> None:
@@ -87,13 +113,19 @@ def test_extractor_rejects_transient_or_unsafe_candidate_shapes() -> None:
             ModelTurn(
                 '{"candidates":['
                 '{"key":"debug.note","content":"temporary debug output from today",'
-                '"kind":"fact","source":"observed"},'
+                '"kind":"fact","source":"CONFIG_OBSERVED",'
+                '"evidence":{"tool_name":"read_file","path":"debug.log",'
+                '"success":true}},'
                 '{"key":"source.dump","content":"x = 1\\nprint(x)",'
-                '"kind":"fact","source":"observed"},'
+                '"kind":"fact","source":"CONFIG_OBSERVED",'
+                '"evidence":{"tool_name":"read_file","path":"source.py",'
+                '"success":true}},'
                 '{"key":"module.size","content":"Keep modules small",'
-                '"kind":"unknown","source":"user"},'
+                '"kind":"unknown","source":"USER_EXPLICIT",'
+                '"evidence":{"user_quote":"Keep modules small"}},'
                 '{"key":"python.version","content":"Use Python 3.11",'
-                '"kind":"architecture","source":"user"}'
+                '"kind":"architecture","source":"USER_EXPLICIT",'
+                '"evidence":{"user_quote":"the project must use Python 3.11"}}'
                 "]}"
             )
         ]
@@ -103,7 +135,11 @@ def test_extractor_rejects_transient_or_unsafe_candidate_shapes() -> None:
         (Message(Role.USER, "the project must use Python 3.11"),)
     ) == (
         MemoryCandidate(
-            "python.version", "Use Python 3.11", "architecture", "user"
+                "python.version",
+                "Use Python 3.11",
+                "architecture",
+                "USER_EXPLICIT",
+                MemoryEvidence(user_quote="the project must use Python 3.11"),
         ),
     )
 
@@ -129,10 +165,20 @@ class _Extractor:
         self.calls.append(messages)
         content = "Use pytest" if len(self.calls) == 1 else "Use ruff"
         key = "test.command" if len(self.calls) == 1 else "lint.command"
-        return (MemoryCandidate(key, content, "command", "observed"),)
+        quote = messages[0].content
+        assert quote is not None
+        return (
+            MemoryCandidate(
+                key,
+                content,
+                "command",
+                "USER_EXPLICIT",
+                MemoryEvidence(user_quote=quote),
+            ),
+        )
 
 
-def test_shell_requires_confirmation_and_defaults_to_reject(tmp_path: Path) -> None:
+def test_shell_automatically_persists_without_confirmation(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     session_store = JsonSessionStore(
@@ -156,7 +202,7 @@ def test_shell_requires_confirmation_and_defaults_to_reject(tmp_path: Path) -> N
         (),
     )
     extractor = _Extractor()
-    answers = iter(("first task", "y", "second task", "", "/exit"))
+    answers = iter(("Always use pytest", "Always use ruff", "/exit"))
     prompts: list[str] = []
 
     def read(prompt: str) -> str:
@@ -172,14 +218,17 @@ def test_shell_requires_confirmation_and_defaults_to_reject(tmp_path: Path) -> N
         candidate_extractor=extractor,  # type: ignore[arg-type]
     ).run() == 0
 
-    assert [item.text for item in memory_store.list(workspace)] == ["Use pytest"]
+    assert [item.text for item in memory_store.list(workspace)] == [
+        "Use pytest",
+        "Use ruff",
+    ]
     assert len(extractor.calls) == 2
     assert all(call[0].role is Role.USER for call in extractor.calls)
-    assert sum("[y/N]" in prompt for prompt in prompts) == 2
-    assert "Use pytest" in runner.memory
+    assert all("[y/N]" not in prompt for prompt in prompts)
+    assert "Use pytest" in runner.memory and "Use ruff" in runner.memory
 
 
-def test_shell_conflict_requires_separate_replace_confirmation(tmp_path: Path) -> None:
+def test_shell_automatically_updates_equal_strength_conflict(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     session_store = JsonSessionStore(
@@ -207,13 +256,23 @@ def test_shell_conflict_requires_separate_replace_confirmation(tmp_path: Path) -
     )
 
     class ConflictExtractor:
-        def extract(self, _messages: tuple[Message, ...]):
+        last_diagnostic = None
+
+        def extract(self, messages: tuple[Message, ...]):
+            quote = messages[0].content
+            assert quote is not None
             return (
-                MemoryCandidate("test.runner", "unittest", "command", "observed"),
+                MemoryCandidate(
+                    "test.runner",
+                    "unittest",
+                    "command",
+                    "USER_EXPLICIT",
+                    MemoryEvidence(user_quote=quote),
+                ),
             )
 
     prompts: list[str] = []
-    answers = iter(("task one", "n", "task two", "y", "/exit"))
+    answers = iter(("From now on always use unittest", "/exit"))
 
     def read(prompt: str) -> str:
         prompts.append(prompt)
@@ -232,5 +291,5 @@ def test_shell_conflict_requires_separate_replace_confirmation(tmp_path: Path) -
     assert replaced.id == original.id
     assert replaced.key == "test.runner"
     assert replaced.content == "unittest"
-    assert replaced.source == "confirmed_candidate"
-    assert sum("replace" in prompt and "[y/N]" in prompt for prompt in prompts) == 2
+    assert replaced.source == "USER_EXPLICIT"
+    assert all("[y/N]" not in prompt for prompt in prompts)

@@ -127,16 +127,6 @@ class RecallView:
 
 
 @dataclass(frozen=True, slots=True)
-class MemoryCandidateView:
-    id: str
-    key: str
-    content: str
-    kind: str
-    source: str
-    action: str
-
-
-@dataclass(frozen=True, slots=True)
 class ProductStatus:
     provider: str
     model: str

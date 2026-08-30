@@ -103,6 +103,43 @@ def test_live_tool_updates_in_place_and_subagents_form_a_visible_tree(tmp_path: 
     asyncio.run(scenario())
 
 
+def test_automatic_memory_add_and_update_are_lightweight_activity_events(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        service = FakeProductService(tmp_path)
+        app = CodingAgentApp(service)
+        async with app.run_test() as pilot:
+            service.publish(
+                ProductEvent(
+                    ProductEventKind.MEMORY_ADDED,
+                    NOW,
+                    "s",
+                    "task",
+                    None,
+                    "test.command = ctest",
+                    status=ActivityStatus.SUCCEEDED,
+                )
+            )
+            service.publish(
+                ProductEvent(
+                    ProductEventKind.MEMORY_UPDATED,
+                    NOW,
+                    "s",
+                    "task",
+                    None,
+                    "test.command = ctest --output-on-failure",
+                    status=ActivityStatus.SUCCEEDED,
+                )
+            )
+            await pilot.pause()
+            text = app.query_one("#activity", ActivityPane).plain_text
+            assert "[memory] Added test.command = ctest" in text
+            assert "[memory] Updated test.command = ctest --output-on-failure" in text
+
+    asyncio.run(scenario())
+
+
 def test_same_step_parallel_tool_events_update_by_tool_call_id(tmp_path: Path) -> None:
     async def scenario() -> None:
         service = FakeProductService(tmp_path)
