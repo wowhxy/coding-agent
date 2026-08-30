@@ -6,6 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ from .protocol import Message, Role, ToolCall
 from .summary import SummaryState
 
 
-SESSION_SCHEMA_VERSION = 4
+SESSION_SCHEMA_VERSION = 5
 
 _ROOT_FIELDS = {
     "schema_version",
@@ -22,12 +23,14 @@ _ROOT_FIELDS = {
     "provider",
     "model",
     "name",
+    "name_source",
     "created_at",
     "updated_at",
     "messages",
     "summary",
 }
-_V2_ROOT_FIELDS = _ROOT_FIELDS - {"summary"}
+_V3_V4_ROOT_FIELDS = _ROOT_FIELDS - {"name_source"}
+_V2_ROOT_FIELDS = _V3_V4_ROOT_FIELDS - {"summary"}
 _V1_ROOT_FIELDS = _V2_ROOT_FIELDS - {"name"}
 _SESSION_ID = re.compile(r"[0-9a-f]{12}")
 
@@ -44,6 +47,13 @@ class SessionError(Exception):
         return f"{self.error_code}: {self.message}"
 
 
+class SessionNameSource(str, Enum):
+    """Authority that supplied a persisted session display name."""
+
+    AUTO = "auto"
+    MANUAL = "manual"
+
+
 @dataclass(frozen=True, slots=True)
 class SessionRecord:
     """The complete provider-neutral history and metadata for one session."""
@@ -57,6 +67,7 @@ class SessionRecord:
     messages: tuple[Message, ...]
     name: str | None = None
     summary: SummaryState | None = None
+    name_source: SessionNameSource | None = None
 
 
 def serialize_session(record: SessionRecord) -> str:
@@ -70,6 +81,9 @@ def serialize_session(record: SessionRecord) -> str:
         "provider": record.provider,
         "model": record.model,
         "name": record.name,
+        "name_source": (
+            record.name_source.value if record.name_source is not None else None
+        ),
         "created_at": _format_timestamp(record.created_at),
         "updated_at": _format_timestamp(record.updated_at),
         "messages": [_message_to_payload(message) for message in record.messages],
@@ -94,18 +108,18 @@ def deserialize_session(text: str) -> SessionRecord:
         _corrupt("session schema version is missing")
 
     version = payload["schema_version"]
-    supported_versions = (1, 2, 3, SESSION_SCHEMA_VERSION)
+    supported_versions = (1, 2, 3, 4, SESSION_SCHEMA_VERSION)
     if type(version) in (int, float) and version not in supported_versions:
         raise SessionError("SESSION_VERSION_UNSUPPORTED", "session schema version is unsupported")
     if type(version) is not int or version not in supported_versions:
         _corrupt("session schema version is invalid")
-    expected_fields = (
-        _V1_ROOT_FIELDS
-        if version == 1
-        else _V2_ROOT_FIELDS
-        if version == 2
-        else _ROOT_FIELDS
-    )
+    expected_fields = {
+        1: _V1_ROOT_FIELDS,
+        2: _V2_ROOT_FIELDS,
+        3: _V3_V4_ROOT_FIELDS,
+        4: _V3_V4_ROOT_FIELDS,
+        SESSION_SCHEMA_VERSION: _ROOT_FIELDS,
+    }[version]
     if set(payload) != expected_fields:
         _corrupt("session document fields are invalid")
 
@@ -114,6 +128,13 @@ def deserialize_session(text: str) -> SessionRecord:
     provider = _parse_name(payload["provider"], "provider")
     model = _parse_name(payload["model"], "model")
     name = None if version == 1 else _parse_optional_session_name(payload["name"])
+    name_source = (
+        _parse_name_source(payload["name_source"], name)
+        if version == SESSION_SCHEMA_VERSION
+        else SessionNameSource.MANUAL
+        if name is not None
+        else None
+    )
     created_at = _parse_timestamp(payload["created_at"])
     updated_at = _parse_timestamp(payload["updated_at"])
     messages = _parse_messages(payload["messages"], allow_empty=version >= 2)
@@ -135,6 +156,7 @@ def deserialize_session(text: str) -> SessionRecord:
         messages=messages,
         name=name,
         summary=summary,
+        name_source=name_source,
     )
     _validate_record(record)
     return record
@@ -202,6 +224,7 @@ def _validate_record(record: SessionRecord) -> None:
     _parse_name(record.provider, "provider")
     _parse_name(record.model, "model")
     _parse_optional_session_name(record.name)
+    _validate_name_source(record.name_source, record.name)
     _format_timestamp(record.created_at)
     _format_timestamp(record.updated_at)
     _validate_messages(record.messages)
@@ -292,6 +315,30 @@ def _parse_optional_session_name(value: Any) -> str | None:
     if type(value) is not str or value != value.strip() or not value or len(value) > 80:
         _corrupt("session name is invalid")
     return value
+
+
+def _parse_name_source(
+    value: Any,
+    name: str | None,
+) -> SessionNameSource | None:
+    if value is None:
+        source = None
+    elif type(value) is str:
+        try:
+            source = SessionNameSource(value)
+        except ValueError:
+            _corrupt("session name source is invalid")
+    else:
+        _corrupt("session name source is invalid")
+    _validate_name_source(source, name)
+    return source
+
+
+def _validate_name_source(value: Any, name: str | None) -> None:
+    if value is not None and not isinstance(value, SessionNameSource):
+        _corrupt("session name source is invalid")
+    if (name is None) != (value is None):
+        _corrupt("session name and source must be set together")
 
 
 def _format_timestamp(value: Any) -> str:

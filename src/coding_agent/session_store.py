@@ -16,7 +16,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .session import SessionError, SessionRecord, deserialize_session, serialize_session
+from .session import (
+    SessionError,
+    SessionNameSource,
+    SessionRecord,
+    deserialize_session,
+    serialize_session,
+)
 
 
 _INDEX_SCHEMA_VERSION = 2
@@ -196,7 +202,13 @@ class JsonSessionStore:
                 "SESSION_NAME_INVALID", "session name must contain 1 to 80 characters"
             )
         with self._lock:
-            return self._save(replace(record, name=normalized))
+            return self._save(
+                replace(
+                    record,
+                    name=normalized,
+                    name_source=SessionNameSource.MANUAL,
+                )
+            )
 
     def delete_session(self, session_id: str, workspace: Path) -> SessionRecord | None:
         """Delete one persisted session and return the next latest record."""

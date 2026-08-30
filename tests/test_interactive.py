@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -12,7 +13,7 @@ from coding_agent.agent import AgentRunner
 from coding_agent.context import ContextManager, ConversationHistory
 from coding_agent.interactive import InteractiveSession
 from coding_agent.protocol import Message, ModelTurn, Role, RunResult, RunStatus, ToolCall
-from coding_agent.session import SessionError, SessionRecord
+from coding_agent.session import SessionError, SessionNameSource, SessionRecord
 from coding_agent.session_store import JsonSessionStore
 from coding_agent.tools.registry import ToolRegistry
 from fakes import FakeModelClient
@@ -29,6 +30,15 @@ class FakeStore:
     def save(self, record: SessionRecord) -> SessionRecord:
         self.saved.append(record)
         return replace(record, model=f"{record.model}-saved", updated_at=NOW)
+
+    def rename_session(self, record: SessionRecord, name: str) -> SessionRecord:
+        renamed = replace(
+            record,
+            name=name.strip(),
+            name_source=SessionNameSource.MANUAL,
+        )
+        self.saved.append(renamed)
+        return renamed
 
 
 class ScriptedRunner:
@@ -124,6 +134,117 @@ def test_normal_turns_commit_without_redacting_canonical_history(tmp_path: Path)
     assert interactive.history.persisted_messages is not store.saved[-1].messages
     assert interactive.record.model == "current-model-saved"
     assert [call[0][-1].content for call in model.calls] == [" first task ", "follow-up"]
+
+
+def test_first_successful_turn_auto_names_once_from_unchanged_task(tmp_path: Path) -> None:
+    runner = ScriptedRunner([RunStatus.FINAL_RESPONSE, RunStatus.FINAL_RESPONSE])
+    store = FakeStore()
+    interactive = session(tmp_path, runner, store, inputs("/exit"))
+
+    first = interactive.execute("请修复 Unicode parser 的测试失败")
+    first_name = interactive.record.name
+    second = interactive.execute("完全不同的第二个任务")
+
+    assert first.status is RunStatus.FINAL_RESPONSE
+    assert second.status is RunStatus.FINAL_RESPONSE
+    assert first_name == "修复 Unicode parser 的测试失败"
+    assert interactive.record.name == first_name
+    assert interactive.record.name_source is SessionNameSource.AUTO
+    assert [call[1] for call in runner.calls] == [
+        "请修复 Unicode parser 的测试失败",
+        "完全不同的第二个任务",
+    ]
+
+
+def test_existing_manual_name_is_never_replaced_by_auto_naming(tmp_path: Path) -> None:
+    runner = ScriptedRunner([RunStatus.FINAL_RESPONSE])
+    store = FakeStore()
+    interactive = session(tmp_path, runner, store, inputs("/exit"))
+    interactive.record = replace(
+        interactive.record,
+        name="Legacy manual title",
+        name_source=SessionNameSource.MANUAL,
+    )
+
+    interactive.execute("first successful task")
+
+    assert interactive.record.name == "Legacy manual title"
+    assert interactive.record.name_source is SessionNameSource.MANUAL
+
+
+def test_failed_or_cancelled_initial_turn_does_not_auto_name(tmp_path: Path) -> None:
+    runner = ScriptedRunner(
+        [RunStatus.MODEL_ERROR, RunStatus.CANCELLED, RunStatus.FINAL_RESPONSE]
+    )
+    interactive = session(tmp_path, runner, FakeStore(), inputs("/exit"))
+
+    assert interactive.execute("provider failure").status is RunStatus.MODEL_ERROR
+    assert interactive.record.name is None
+    assert interactive.execute("cancelled task").status is RunStatus.CANCELLED
+    assert interactive.record.name is None
+    assert interactive.execute("请检查 pytest").status is RunStatus.FINAL_RESPONSE
+    assert interactive.record.name == "检查 pytest"
+    assert interactive.record.name_source is SessionNameSource.AUTO
+
+
+def test_manual_rename_during_first_turn_wins_without_losing_history(
+    tmp_path: Path,
+) -> None:
+    class BlockingRunner:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def run_turn(
+            self,
+            history: ConversationHistory,
+            user_message: str,
+        ) -> RunResult:
+            self.started.set()
+            assert self.release.wait(timeout=5)
+            history.append(Message(Role.USER, user_message))
+            history.append(Message(Role.ASSISTANT, "done"))
+            return RunResult(RunStatus.FINAL_RESPONSE, "done", 1, None)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = JsonSessionStore(
+        tmp_path / "home",
+        clock=lambda: NOW,
+        id_generator=lambda: "012345abcdef",
+    )
+    runner = BlockingRunner()
+    interactive = InteractiveSession(
+        runner=runner,  # type: ignore[arg-type]
+        history=ConversationHistory("system"),
+        record=store.create_session(workspace, "provider", "model"),
+        store=store,
+        provider="provider",
+        model="model",
+        sensitive_values=(),
+    )
+    results: list[RunResult] = []
+    worker = threading.Thread(
+        target=lambda: results.append(interactive.execute("first task"))
+    )
+
+    worker.start()
+    assert runner.started.wait(timeout=5)
+    renamed = interactive.rename("My Session")
+    runner.release.set()
+    worker.join(timeout=5)
+
+    persisted = store.load_latest(workspace)
+    assert not worker.is_alive()
+    assert results[0].status is RunStatus.FINAL_RESPONSE
+    assert renamed.name_source is SessionNameSource.MANUAL
+    assert persisted is not None
+    assert persisted.name == "My Session"
+    assert persisted.name_source is SessionNameSource.MANUAL
+    assert tuple(message.content for message in persisted.messages) == (
+        "first task",
+        "done",
+    )
 
 
 @pytest.mark.parametrize("value", ["", "  \t "])

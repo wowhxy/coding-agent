@@ -432,9 +432,9 @@ class CodingAgentService:
         return self._session_view_record(record)
 
     def rename_session(self, name: str) -> SessionView:
-        self._require_idle()
-        record = self.store.rename_session(self._interactive.record, name)
-        self._interactive.record = record
+        with self._lock:
+            self._require_open()
+        record = self._interactive.rename(name)
         self._emit(ProductEventKind.SESSION_CHANGED, "Session renamed")
         return self._session_view_record(record)
 

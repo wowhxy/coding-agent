@@ -41,6 +41,18 @@ from .screens import (
     SkillManagementScreen,
     TextPromptScreen,
 )
+from .layout import (
+    COMPACT_WIDTH,
+    DEFAULT_ACTIVITY_WIDTH,
+    DEFAULT_SESSIONS_WIDTH,
+    MAX_ACTIVITY_WIDTH,
+    MAX_SESSIONS_WIDTH,
+    MIN_ACTIVITY_WIDTH,
+    MIN_SESSIONS_WIDTH,
+    PANE_RESIZE_STEP,
+    PanePreferences,
+    calculate_pane_layout,
+)
 from .widgets import (
     ActivityPane,
     Composer,
@@ -75,6 +87,14 @@ class CodingAgentApp(App[None]):
         Binding("ctrl+n", "new_session", "New session", priority=True),
         Binding("ctrl+b", "toggle_sidebar", "Sessions", priority=True),
         Binding("ctrl+l", "toggle_activity", "Activity", priority=True),
+        Binding("alt+left", "narrow_sidebar", "", show=False, priority=True),
+        Binding("alt+right", "widen_sidebar", "", show=False, priority=True),
+        Binding(
+            "alt+shift+left", "widen_activity", "", show=False, priority=True
+        ),
+        Binding(
+            "alt+shift+right", "narrow_activity", "", show=False, priority=True
+        ),
         Binding("ctrl+p", "command_palette", "Commands", priority=True),
         Binding("ctrl+k", "show_help", "Help", priority=True),
         Binding("ctrl+q", "request_quit", "Quit", priority=True),
@@ -87,6 +107,9 @@ class CodingAgentApp(App[None]):
         self._closed_service = False
         self._running_task = False
         self._sidebar_requested = True
+        self._activity_requested = True
+        self._preferred_sessions_width = DEFAULT_SESSIONS_WIDTH
+        self._preferred_activity_width = DEFAULT_ACTIVITY_WIDTH
         self._input_history: list[str] = []
         self._history_index = 0
         self._last_transient_error: ProductEvent | None = None
@@ -146,9 +169,6 @@ class CodingAgentApp(App[None]):
         ).update_for(event.text_area.text)
 
     def action_submit(self) -> None:
-        if self._running_task:
-            self.notify("A task is already running", severity="warning")
-            return
         composer = self.query_one("#composer", Composer)
         text = composer.text
         if not text.strip():
@@ -159,6 +179,12 @@ class CodingAgentApp(App[None]):
         except CommandError as exc:
             self.notify(exc.message, severity="error")
             return
+        if self._running_task and not _allowed_while_running(command):
+            self.notify(
+                "A task is already running; only /rename is available",
+                severity="warning",
+            )
+            return
         composer.clear()
         if command is not None:
             self._execute_command(command)
@@ -167,7 +193,6 @@ class CodingAgentApp(App[None]):
         self._input_history.append(text)
         self._history_index = len(self._input_history)
         self._running_task = True
-        composer.disabled = True
         self._run_task(text)
 
     @work(thread=True, exclusive=True, group="foreground-agent")
@@ -220,12 +245,40 @@ class CodingAgentApp(App[None]):
         self.query_one("#composer", Composer).focus()
 
     def action_toggle_sidebar(self) -> None:
-        self._sidebar_requested = not self.query_one("#session-sidebar").display
-        self.query_one("#session-sidebar").display = self._sidebar_requested
+        self._sidebar_requested = not self._sidebar_requested
+        self._apply_responsive(self.size.width)
 
     def action_toggle_activity(self) -> None:
-        activity = self.query_one("#activity", ActivityPane)
-        activity.display = not activity.display
+        self._activity_requested = not self._activity_requested
+        self._apply_responsive(self.size.width)
+
+    def action_narrow_sidebar(self) -> None:
+        self._preferred_sessions_width = max(
+            MIN_SESSIONS_WIDTH,
+            self._preferred_sessions_width - PANE_RESIZE_STEP,
+        )
+        self._apply_responsive(self.size.width)
+
+    def action_widen_sidebar(self) -> None:
+        self._preferred_sessions_width = min(
+            MAX_SESSIONS_WIDTH,
+            self._preferred_sessions_width + PANE_RESIZE_STEP,
+        )
+        self._apply_responsive(self.size.width)
+
+    def action_widen_activity(self) -> None:
+        self._preferred_activity_width = min(
+            MAX_ACTIVITY_WIDTH,
+            self._preferred_activity_width + PANE_RESIZE_STEP,
+        )
+        self._apply_responsive(self.size.width)
+
+    def action_narrow_activity(self) -> None:
+        self._preferred_activity_width = max(
+            MIN_ACTIVITY_WIDTH,
+            self._preferred_activity_width - PANE_RESIZE_STEP,
+        )
+        self._apply_responsive(self.size.width)
 
     def action_show_help(self) -> None:
         self.push_screen(HelpScreen(_help_markdown()))
@@ -306,18 +359,27 @@ class CodingAgentApp(App[None]):
                 self._last_transient_error = event
         elif event.kind is ProductEventKind.ERROR:
             self._last_transient_error = event
-        self._phase = _phase_for_event(event, current=self._phase)
         status_getter = getattr(self.service, "get_status", None)
         status = (
             status_getter()
             if callable(status_getter)
             else self.service.snapshot().status
         )
+        self._phase = _phase_for_event(
+            event,
+            current=self._phase,
+            agent_state=status.agent_state,
+        )
         self.query_one("#status-bar", ProductStatusBar).update_status(
             status, self._phase
         )
 
     def _execute_command(self, command) -> None:
+        refresh_conversation = not (
+            self._running_task
+            and command.name is CommandName.SESSION
+            and command.action is CommandAction.RENAME
+        )
         try:
             if command.name is CommandName.SESSION:
                 self._execute_session_command(command)
@@ -331,7 +393,11 @@ class CodingAgentApp(App[None]):
                 self._show_recall(command.argument)
             elif command.name is CommandName.HELP:
                 self.action_show_help()
-            self._refresh_all(self.service.snapshot())
+            snapshot = self.service.snapshot()
+            if refresh_conversation:
+                self._refresh_all(snapshot)
+            else:
+                self._refresh_session_chrome(snapshot)
         except Exception as exc:
             self._show_product_error(exc)
 
@@ -341,11 +407,13 @@ class CodingAgentApp(App[None]):
         elif command.action is CommandAction.SWITCH:
             self.handle_session_selected(command.argument)
         elif command.action is CommandAction.LIST:
-            self.query_one("#session-sidebar").display = True
+            self._sidebar_requested = True
+            self._apply_responsive(self.size.width)
             self.query_one("#session-list").focus()
         elif command.action is CommandAction.SEARCH:
             self.query_one("#session-filter").value = command.argument
-            self.query_one("#session-sidebar").display = True
+            self._sidebar_requested = True
+            self._apply_responsive(self.size.width)
         elif command.action is CommandAction.RENAME:
             self.service.rename_session(command.argument)
         elif command.action is CommandAction.DELETE:
@@ -417,8 +485,7 @@ class CodingAgentApp(App[None]):
             self.action_new_session()
         elif action == "switch_session":
             self._sidebar_requested = True
-            sidebar = self.query_one("#session-sidebar")
-            sidebar.display = True
+            self._apply_responsive(self.size.width)
             self.query_one("#session-list").focus()
         elif action == "skills":
             self.action_show_skills()
@@ -432,6 +499,14 @@ class CodingAgentApp(App[None]):
             self.push_screen(TextPromptScreen("Recall query"), self._palette_recall)
         elif action == "toggle_activity":
             self.action_toggle_activity()
+        elif action == "widen_sessions":
+            self.action_widen_sidebar()
+        elif action == "narrow_sessions":
+            self.action_narrow_sidebar()
+        elif action == "widen_activity":
+            self.action_widen_activity()
+        elif action == "narrow_activity":
+            self.action_narrow_activity()
         elif action == "help":
             self.action_show_help()
 
@@ -492,11 +567,14 @@ class CodingAgentApp(App[None]):
             self.notify(f"{type(exc).__name__}: memory decision failed", severity="error")
 
     def _refresh_all(self, snapshot: ProductSnapshot) -> None:
+        self._refresh_session_chrome(snapshot)
+        self.query_one("#conversation", ConversationPane).show_snapshot(snapshot)
+        self.query_one("#activity", ActivityPane).show_snapshot(snapshot)
+
+    def _refresh_session_chrome(self, snapshot: ProductSnapshot) -> None:
         self.query_one("#session-sidebar", SessionSidebar).update_sessions(
             snapshot.sessions
         )
-        self.query_one("#conversation", ConversationPane).show_snapshot(snapshot)
-        self.query_one("#activity", ActivityPane).show_snapshot(snapshot)
         self.query_one("#status-bar", ProductStatusBar).update_status(
             snapshot.status, self._phase
         )
@@ -512,10 +590,25 @@ class CodingAgentApp(App[None]):
         )
 
     def _apply_responsive(self, width: int) -> None:
-        compact = width < 96
+        layout = calculate_pane_layout(
+            width,
+            PanePreferences(
+                sessions_width=self._preferred_sessions_width,
+                activity_width=self._preferred_activity_width,
+                show_sessions=self._sidebar_requested,
+                show_activity=self._activity_requested,
+            ),
+        )
+        compact = width < COMPACT_WIDTH
         self.set_class(compact, "compact")
         sidebar = self.query_one("#session-sidebar")
-        sidebar.display = self._sidebar_requested and not compact
+        sidebar.display = layout.show_sessions
+        if layout.show_sessions:
+            sidebar.styles.width = layout.sessions_width
+        activity = self.query_one("#activity", ActivityPane)
+        activity.display = layout.show_activity
+        if layout.show_activity:
+            activity.styles.width = layout.activity_width
         self.query_one("#status-bar", ProductStatusBar).refresh_width()
 
     def _set_composer_text(self, value: str) -> None:
@@ -545,6 +638,8 @@ def _help_markdown() -> str:
         "- `Ctrl+Enter` submit\n- `Enter` newline\n- `Ctrl+C` cancel/clear\n"
         "- `Esc` focus input\n- `Ctrl+N` new session\n- `Ctrl+B` sessions\n"
         "- `Ctrl+L` toggle Activity\n- `Ctrl+P` command palette\n"
+        "- `Alt+Left/Right` resize Sessions\n"
+        "- `Alt+Shift+Left/Right` resize Activity\n"
         "- `Ctrl+Q` quit\n\n"
         "## Commands\n\n" + commands
     )
@@ -560,6 +655,7 @@ def _phase_for_event(
     event: ProductEvent,
     *,
     current: str,
+    agent_state: AgentState,
 ) -> str:
     if event.kind is ProductEventKind.TASK_STARTED:
         return "Working"
@@ -582,7 +678,11 @@ def _phase_for_event(
     if event.kind is ProductEventKind.FINAL_RESPONSE:
         return "Ready"
     if event.kind is ProductEventKind.SESSION_CHANGED:
-        return "Ready"
+        return (
+            current
+            if agent_state in {AgentState.RUNNING, AgentState.CANCELLING}
+            else "Ready"
+        )
     if event.kind in {ProductEventKind.ERROR, ProductEventKind.TASK_FAILED}:
         return "Error"
     if event.kind is ProductEventKind.TASK_CANCELLED:
@@ -613,4 +713,12 @@ def _exception_event(exc: Exception) -> ProductEvent:
         detail,
         ActivityStatus.FAILED,
         source=ActivitySource.ERROR,
+    )
+
+
+def _allowed_while_running(command) -> bool:
+    return (
+        command is not None
+        and command.name is CommandName.SESSION
+        and command.action is CommandAction.RENAME
     )

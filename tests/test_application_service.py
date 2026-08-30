@@ -11,6 +11,7 @@ from coding_agent.application.service import CodingAgentService
 from coding_agent.application.state import AgentState, ConversationKind
 from coding_agent.config import RuntimeConfig
 from coding_agent.protocol import ModelTurn, RunStatus
+from coding_agent.session import SessionNameSource
 from coding_agent.session_store import JsonSessionStore
 from tests.fakes import FakeModelClient
 
@@ -64,6 +65,9 @@ def test_service_submits_persists_and_emits_typed_lifecycle(tmp_path: Path) -> N
     )
     assert saved is not None
     assert tuple(message.content for message in saved.messages) == ("fix parser", "fixed")
+    assert saved.name == "fix parser"
+    assert saved.name_source is SessionNameSource.AUTO
+    assert len(client.calls) == 1
     assert events[0].kind is ProductEventKind.TASK_STARTED
     assert any(event.kind is ProductEventKind.MODEL_WAITING for event in events)
     assert any(event.kind is ProductEventKind.FINAL_RESPONSE for event in events)
@@ -150,6 +154,34 @@ def test_service_rejects_overlapping_or_empty_tasks(tmp_path: Path) -> None:
     service.cancel_task()
     client.release.set()
     thread.join(timeout=5)
+    service.close()
+
+
+def test_service_allows_manual_rename_while_task_is_running(tmp_path: Path) -> None:
+    client = _BlockingClient()
+    service, workspace, home = _service(tmp_path, client)
+    results = []
+    thread = threading.Thread(
+        target=lambda: results.append(service.submit_task("first task"))
+    )
+    thread.start()
+    assert client.started.wait(timeout=5)
+
+    renamed = service.rename_session("Manual title")
+    client.release.set()
+    thread.join(timeout=5)
+
+    persisted = JsonSessionStore(home).load_latest(workspace)
+    assert not thread.is_alive()
+    assert results[0].status is RunStatus.FINAL_RESPONSE
+    assert renamed.name == "Manual title"
+    assert persisted is not None
+    assert persisted.name == "Manual title"
+    assert persisted.name_source is SessionNameSource.MANUAL
+    assert tuple(message.content for message in persisted.messages) == (
+        "first task",
+        "too late",
+    )
     service.close()
 
 

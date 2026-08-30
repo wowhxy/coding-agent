@@ -43,7 +43,7 @@ def _record(workspace: Path) -> SessionRecord:
     )
 
 
-def test_session_v4_round_trip_persists_versioned_summary_and_old_versions_migrate(
+def test_session_v5_round_trip_persists_versioned_summary_and_old_versions_migrate(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -52,14 +52,17 @@ def test_session_v4_round_trip_persists_versioned_summary_and_old_versions_migra
 
     payload = json.loads(serialize_session(record))
     restored = deserialize_session(json.dumps(payload))
-    v3 = json.loads(json.dumps(payload))
+    v4 = json.loads(json.dumps(payload))
+    v4["schema_version"] = 4
+    del v4["name_source"]
+    v3 = json.loads(json.dumps(v4))
     v3["schema_version"] = 3
     del v3["summary"]["schema_version"]
-    v2 = dict(payload)
+    v2 = dict(v4)
     v2["schema_version"] = 2
     del v2["summary"]
 
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
     assert payload["summary"] == {
         "schema_version": 1,
         "text": "existing summary",
@@ -67,6 +70,7 @@ def test_session_v4_round_trip_persists_versioned_summary_and_old_versions_migra
         "updated_at": "2026-08-29T08:05:00Z",
     }
     assert restored == record
+    assert deserialize_session(json.dumps(v4)).summary == record.summary
     assert deserialize_session(json.dumps(v3)).summary == record.summary
     assert deserialize_session(json.dumps(v2)).summary is None
 

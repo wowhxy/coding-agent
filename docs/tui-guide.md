@@ -36,6 +36,12 @@ readiness without contacting the provider or printing the key.
   based on actual `execute_command` results, not merely the model's final claim.
 - Continue typing to work in the same persisted session. The most recent session
   for the workspace resumes automatically after restart.
+- A previously unnamed session receives a deterministic local title after its
+  first protocol-complete turn. Failed or cancelled first turns remain
+  `Untitled`; `/rename <name>` always creates a manual title and can be used while
+  a task is running.
+- Persisted conversations open at the bottom. New streamed text follows only
+  while you are already at the bottom, so scrolling up to read is not interrupted.
 
 ## Keys
 
@@ -48,6 +54,8 @@ readiness without contacting the provider or printing the key.
 | `Ctrl+N` | Create a session |
 | `Ctrl+B` | Toggle session sidebar |
 | `Ctrl+L` | Show/hide Activity |
+| `Alt+Left` / `Alt+Right` | Narrow/widen Sessions |
+| `Alt+Shift+Left` / `Alt+Shift+Right` | Widen/narrow Activity |
 | `Ctrl+P` | Open the command palette |
 | `Ctrl+K` | Show help |
 | `Ctrl+Q` | Quit; confirms first when a task is running |
@@ -55,6 +63,9 @@ readiness without contacting the provider or printing the key.
 At 80x24 the sidebar hides automatically while Conversation, Activity, and the
 editor stay usable. Activity follows new rows while you are at the bottom; if
 you scroll upward it preserves your position until you return to the end.
+At ultra-narrow widths Activity also hides to protect the center conversation.
+The side panes use bounded widths (Sessions 24-48, Activity 28-60), resize in
+four-column steps, and restore process-local preferences when space returns.
 
 ## Commands
 
@@ -68,7 +79,7 @@ you scroll upward it preserves your position until you return to the end.
 
 Typing `/` opens completion suggestions. Use `Up`/`Down` to choose and `Tab` to
 accept without submitting. The `Ctrl+P` palette provides the common Session,
-Skills, Plugins, Memory, Recall, Activity, and Help actions.
+Skills, Plugins, Memory, Recall, Activity, pane-resizing, and Help actions.
 
 `/skills` and `/plugins` open interactive managers. Skills show scope and
 manual/automatic/inactive status and can be activated or deactivated. Plugins

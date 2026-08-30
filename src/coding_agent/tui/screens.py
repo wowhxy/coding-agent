@@ -116,6 +116,10 @@ class CommandPaletteScreen(ModalScreen[str | None]):
         ("memory", "Memory"),
         ("recall", "Recall"),
         ("toggle_activity", "Toggle Activity"),
+        ("widen_sessions", "Widen Sessions"),
+        ("narrow_sessions", "Narrow Sessions"),
+        ("widen_activity", "Widen Activity"),
+        ("narrow_activity", "Narrow Activity"),
         ("help", "Help"),
     )
 

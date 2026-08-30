@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 from coding_agent.tui.app import CodingAgentApp
-from coding_agent.tui.widgets import Composer, SlashCommandSuggestions
+from coding_agent.tui.widgets import Composer, ConversationPane, SlashCommandSuggestions
 from tests.tui_fakes import FakeProductService
 
 
@@ -57,12 +57,40 @@ def test_ctrl_c_cancels_running_task_and_restores_input(tmp_path: Path) -> None:
             await pilot.press("ctrl+enter")
             assert await asyncio.to_thread(service.started.wait, 2)
             await pilot.pause()
-            assert composer.disabled is True
+            assert composer.disabled is False
             await pilot.press("ctrl+c")
             await pilot.pause(0.1)
             assert service.cancel_count == 1
             assert composer.disabled is False
             assert app.focused is composer
+
+    asyncio.run(scenario())
+
+
+def test_running_task_allows_manual_rename_without_clearing_live_conversation(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        service = FakeProductService(tmp_path, blocking=True)
+        app = CodingAgentApp(service)
+        async with app.run_test() as pilot:
+            composer = app.query_one("#composer", Composer)
+            composer.text = "first task"
+            await pilot.press("ctrl+enter")
+            assert await asyncio.to_thread(service.started.wait, 2)
+            await pilot.pause()
+
+            assert composer.disabled is False
+            composer.text = "/rename Manual title"
+            await pilot.press("ctrl+enter")
+            await pilot.pause()
+
+            assert service.renames == ["Manual title"]
+            assert "first task" in app.query_one(
+                "#conversation", ConversationPane
+            ).plain_text
+            service.release.set()
+            await pilot.pause(0.1)
 
     asyncio.run(scenario())
 

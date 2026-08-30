@@ -209,8 +209,7 @@ class InteractiveShell:
         self.output(f"[session] created: {created.session_id}")
 
     def _rename(self, name: str) -> None:
-        renamed = self.store.rename_session(self.session.record, name)
-        self.session.record = renamed
+        renamed = self.session.rename(name)
         self.output(f"[session] renamed: {renamed.name}")
 
     def _delete(self) -> None:

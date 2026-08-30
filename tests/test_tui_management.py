@@ -146,6 +146,8 @@ def test_command_palette_is_keyboard_discoverable_and_reuses_app_actions(
             assert isinstance(app.screen, CommandPaletteScreen)
             assert "New Session" in app.screen.plain_text
             assert "Skills" in app.screen.plain_text
+            assert "Widen Sessions" in app.screen.plain_text
+            assert "Narrow Activity" in app.screen.plain_text
             await pilot.press("enter")
             assert service.new_count == 1
 

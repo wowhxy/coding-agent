@@ -33,7 +33,7 @@ def _v1_document(workspace: Path) -> dict[str, object]:
     }
 
 
-def test_v1_session_migrates_to_optional_fields_and_serializes_as_v4(tmp_path: Path) -> None:
+def test_v1_session_migrates_to_optional_fields_and_serializes_as_v5(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -41,8 +41,9 @@ def test_v1_session_migrates_to_optional_fields_and_serializes_as_v4(tmp_path: P
     encoded = json.loads(serialize_session(record))
 
     assert record.name is None
-    assert encoded["schema_version"] == 4
+    assert encoded["schema_version"] == 5
     assert encoded["name"] is None
+    assert encoded["name_source"] is None
     assert encoded["summary"] is None
 
 

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import asyncio
+from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass
 
 from textual import events, on
@@ -164,6 +165,8 @@ class ConversationPane(Vertical):
         self._stream_text = ""
         self._base_plain = ""
         self._workspace = ""
+        self._session_id = ""
+        self._render_generation = 0
 
     def compose(self) -> ComposeResult:
         yield Static("", id="empty-state")
@@ -171,6 +174,10 @@ class ConversationPane(Vertical):
         yield Static("", id="streaming-text", markup=False)
 
     def show_snapshot(self, snapshot: ProductSnapshot) -> None:
+        session_changed = snapshot.status.session_id != self._session_id
+        should_follow = session_changed or self._at_bottom()
+        previous_scroll_y = self.scroll_y
+        self._session_id = snapshot.status.session_id
         self._workspace = str(snapshot.status.workspace)
         blocks: list[str] = []
         plain: list[str] = []
@@ -183,7 +190,14 @@ class ConversationPane(Vertical):
         streaming.update("")
         streaming.display = False
         self._base_plain = "\n".join(plain)
-        self.query_one("#conversation-markdown", Markdown).update("\n\n".join(blocks))
+        completion = self.query_one("#conversation-markdown", Markdown).update(
+            "\n\n".join(blocks)
+        )
+        self._finish_render_after(
+            completion,
+            follow_bottom=should_follow,
+            previous_scroll_y=previous_scroll_y,
+        )
         self._sync_plain_text()
         empty = self.query_one("#empty-state", Static)
         empty.display = not blocks
@@ -198,11 +212,21 @@ class ConversationPane(Vertical):
         if event.kind is ProductEventKind.TASK_STARTED:
             markdown = self.query_one("#conversation-markdown", Markdown)
             separator = "\n\n" if markdown.source else ""
-            markdown.update(markdown.source + separator + "### You\n\n" + event.title)
+            completion = markdown.update(
+                markdown.source + separator + "### You\n\n" + event.title
+            )
+            self._finish_render_after(
+                completion,
+                follow_bottom=True,
+                previous_scroll_y=self.scroll_y,
+            )
             self._base_plain = "\n".join(filter(None, (self._base_plain, event.title)))
             self._sync_plain_text()
             self.query_one("#empty-state", Static).display = False
         elif event.kind is ProductEventKind.TEXT_DELTA:
+            should_follow = self._at_bottom()
+            if should_follow:
+                self.anchor()
             self._stream_text += event.title
             self._render_stream()
 
@@ -219,6 +243,64 @@ class ConversationPane(Vertical):
         streaming.display = True
         streaming.update("Agent (streaming)\n\n" + self._stream_text)
         self._sync_plain_text()
+
+    def _at_bottom(self) -> bool:
+        return self.max_scroll_y <= 0 or self.is_vertical_scroll_end
+
+    def _finish_render_after(
+        self,
+        completion: Awaitable[object],
+        *,
+        follow_bottom: bool,
+        previous_scroll_y: float,
+    ) -> None:
+        self._render_generation += 1
+        generation = self._render_generation
+
+        async def finish() -> None:
+            await completion
+            if generation != self._render_generation:
+                return
+            positioned = asyncio.Event()
+
+            def apply_position() -> None:
+                try:
+                    if generation != self._render_generation:
+                        return
+                    if follow_bottom:
+                        # Anchoring keeps the pane at the real bottom if Markdown's
+                        # final layout grows again after this refresh. User scrolling
+                        # releases the anchor through Textual's normal scroll API.
+                        self.anchor()
+                        self.scroll_to(
+                            y=max(0, self.max_scroll_y),
+                            animate=False,
+                            force=True,
+                            immediate=True,
+                            release_anchor=False,
+                        )
+                    else:
+                        self.scroll_to(
+                            y=previous_scroll_y,
+                            animate=False,
+                            force=True,
+                            immediate=True,
+                        )
+                finally:
+                    positioned.set()
+
+            # Markdown.update() completes before Textual's next layout refresh.
+            # Apply the final position in that refresh so scroll bounds are current,
+            # without scroll_end() introducing another deferred refresh cycle.
+            if self.call_after_refresh(apply_position):
+                await positioned.wait()
+
+        self.run_worker(
+            finish,
+            group="conversation-render",
+            exclusive=True,
+            exit_on_error=False,
+        )
 
 
 @dataclass(slots=True)

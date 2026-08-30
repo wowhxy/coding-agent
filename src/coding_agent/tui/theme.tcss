@@ -48,6 +48,7 @@ Screen {
 
 #main-panel {
     width: 1fr;
+    min-width: 40;
     height: 1fr;
 }
 
@@ -225,9 +226,4 @@ CommandPaletteScreen, SkillManagementScreen, PluginManagementScreen {
 
 .compact #composer {
     height: 5;
-}
-
-.compact #activity {
-    width: 30;
-    min-width: 24;
 }
