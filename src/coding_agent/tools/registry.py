@@ -163,7 +163,7 @@ class ToolRegistry:
         except ToolArgumentError as exc:
             message = str(exc).strip() or "tool arguments failed validation"
             return _failure(call, "MALFORMED_ARGUMENTS", message)
-        except Exception:
+        except (Exception, SystemExit):
             return _failure(
                 call,
                 "TOOL_INTERNAL_ERROR",
@@ -172,7 +172,7 @@ class ToolRegistry:
 
         try:
             return tool.handler(call.id, normalized)
-        except Exception:
+        except (Exception, SystemExit):
             return _failure(
                 call,
                 "TOOL_INTERNAL_ERROR",

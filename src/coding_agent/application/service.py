@@ -835,8 +835,10 @@ class CodingAgentService:
             self._resources_closed = True
             self._closed = True
             self._agent_state = AgentState.CLOSED
-        self._plugin_manager.close()
-        _close_client(self._client)
+        try:
+            self._plugin_manager.close()
+        finally:
+            _close_client(self._client)
 
 
 def _context_policy(config: RuntimeConfig) -> ContextPolicy:

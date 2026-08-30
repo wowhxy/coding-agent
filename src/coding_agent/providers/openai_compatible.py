@@ -241,6 +241,7 @@ def _parse_response(response: httpx.Response) -> ModelTurn:
     tool_calls = tuple(
         _parse_tool_call(raw_call) for raw_call in raw_tool_calls
     )
+    _require_unique_tool_call_ids(tool_calls)
     if not content and not tool_calls:
         raise ModelProtocolError(
             "model response contained neither content nor tool calls"
@@ -319,6 +320,7 @@ def _parse_stream(lines: Any, text_sink: Callable[[str], None]) -> ModelTurn:
         for _, parts in sorted(fragments.items())
         if _validate_streamed_tool_call(parts)
     )
+    _require_unique_tool_call_ids(calls)
     content = "".join(content_parts) or None
     if content is None and not calls:
         raise ModelProtocolError("model stream contained neither content nor tool calls")
@@ -360,3 +362,9 @@ def _validate_streamed_tool_call(parts: dict[str, str]) -> bool:
     if not parts["id"] or not parts["name"]:
         raise ModelProtocolError("model stream tool call is incomplete")
     return True
+
+
+def _require_unique_tool_call_ids(calls: tuple[ToolCall, ...]) -> None:
+    identifiers = tuple(call.id for call in calls)
+    if len(set(identifiers)) != len(identifiers):
+        raise ModelProtocolError("model tool call ids must be unique")

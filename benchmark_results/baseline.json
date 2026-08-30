@@ -1,0 +1,429 @@
+{
+  "environment": {
+    "cpu_count": 32,
+    "executable_name": "python.exe",
+    "platform": "Windows-11-10.0.26100-SP0",
+    "python_implementation": "CPython",
+    "python_version": "3.13.1"
+  },
+  "profile": "standard",
+  "scenarios": [
+    {
+      "category": "core_agent_loop",
+      "elapsed_seconds": 0.041395,
+      "metrics": {
+        "cases": [
+          {
+            "context_builds": 1,
+            "elapsed_seconds": 0.001011,
+            "model_calls": 1,
+            "steps": 1,
+            "tool_calls": 0
+          },
+          {
+            "context_builds": 2,
+            "elapsed_seconds": 0.002722,
+            "model_calls": 2,
+            "steps": 2,
+            "tool_calls": 1
+          },
+          {
+            "context_builds": 5,
+            "elapsed_seconds": 0.008043,
+            "model_calls": 5,
+            "steps": 5,
+            "tool_calls": 4
+          },
+          {
+            "context_builds": 10,
+            "elapsed_seconds": 0.023527,
+            "model_calls": 10,
+            "steps": 10,
+            "tool_calls": 9
+          },
+          {
+            "context_builds": 2,
+            "elapsed_seconds": 0.00522,
+            "model_calls": 2,
+            "multiple_tool_calls": true,
+            "steps": 2,
+            "tool_calls": 3
+          }
+        ],
+        "model_calls": 20,
+        "tool_calls": 17
+      },
+      "peak_bytes": 49573,
+      "scenario": "fake_model_steps",
+      "status": "passed"
+    },
+    {
+      "category": "tool_execution",
+      "elapsed_seconds": 0.145841,
+      "metrics": {
+        "controlled_io_parallel_seconds": 0.032755,
+        "controlled_io_serial_seconds": 0.091974,
+        "controlled_io_speedup": 2.808,
+        "observed_disk_speedup": 0.525,
+        "parallel_calls": 3,
+        "parallel_groups": 1,
+        "parallel_scheduler_seconds": 0.007644,
+        "serial_calls": 0,
+        "serial_equivalent_seconds": 0.004014,
+        "single_elapsed_seconds": {
+          "list_files": 0.000927,
+          "read_file": 0.002341,
+          "search_text": 0.00377
+        }
+      },
+      "peak_bytes": 96007,
+      "scenario": "builtins_and_parallel_scheduler",
+      "status": "passed"
+    },
+    {
+      "category": "subagents",
+      "elapsed_seconds": 0.179783,
+      "metrics": {
+        "child_model_calls": 3,
+        "child_steps": 3,
+        "max_child_context_chars": 719,
+        "parallel_seconds": 0.049558,
+        "parent_context_chars": 24000,
+        "parent_model_calls": 0,
+        "result_chars": 21,
+        "serial_seconds": 0.127507,
+        "speedup": 2.573
+      },
+      "peak_bytes": 82958,
+      "scenario": "three_independent_investigations",
+      "status": "passed"
+    },
+    {
+      "category": "context_scaling",
+      "elapsed_seconds": 0.126851,
+      "metrics": {
+        "sizes": [
+          {
+            "activity_compressed_turns": 2,
+            "build_seconds": 0.005259,
+            "canonical_history_chars": 13003,
+            "compression_levels": [
+              "L1",
+              "L2",
+              "L3"
+            ],
+            "context_messages": 27,
+            "final_context_chars": 4593,
+            "stale_results_pruned": 6,
+            "summary_used": false,
+            "tool_results_truncated": 2,
+            "turns": 10,
+            "turns_dropped": 2
+          },
+          {
+            "activity_compressed_turns": 42,
+            "build_seconds": 0.013161,
+            "canonical_history_chars": 64963,
+            "compression_levels": [
+              "L1",
+              "L2",
+              "L3"
+            ],
+            "context_messages": 27,
+            "final_context_chars": 4617,
+            "stale_results_pruned": 6,
+            "summary_used": false,
+            "tool_results_truncated": 2,
+            "turns": 50,
+            "turns_dropped": 42
+          },
+          {
+            "activity_compressed_turns": 92,
+            "build_seconds": 0.013029,
+            "canonical_history_chars": 129913,
+            "compression_levels": [
+              "L1",
+              "L2",
+              "L3",
+              "L4"
+            ],
+            "context_messages": 28,
+            "final_context_chars": 4762,
+            "stale_results_pruned": 6,
+            "summary_used": true,
+            "tool_results_truncated": 2,
+            "turns": 100,
+            "turns_dropped": 92
+          },
+          {
+            "activity_compressed_turns": 492,
+            "build_seconds": 0.054671,
+            "canonical_history_chars": 649913,
+            "compression_levels": [
+              "L1",
+              "L2",
+              "L3",
+              "L4"
+            ],
+            "context_messages": 28,
+            "final_context_chars": 4786,
+            "stale_results_pruned": 6,
+            "summary_used": true,
+            "tool_results_truncated": 2,
+            "turns": 500,
+            "turns_dropped": 492
+          }
+        ]
+      },
+      "peak_bytes": 2645567,
+      "scenario": "progressive_compression",
+      "status": "passed"
+    },
+    {
+      "category": "session_scaling",
+      "elapsed_seconds": 70.4891,
+      "metrics": {
+        "sizes": [
+          {
+            "delete_seconds": 0.029907,
+            "index_bytes": 57344,
+            "latest_fast_path": true,
+            "latest_resume_seconds": 0.019564,
+            "list_seconds": 0.004918,
+            "listed": 10,
+            "metadata_lookup_seconds": 0.000587,
+            "recall_hits": 5,
+            "recall_seconds": 0.005747,
+            "rename_seconds": 0.017943,
+            "search_backend": "fts5",
+            "search_seconds": 0.085097,
+            "session_files_loaded_for_list": 0,
+            "sessions": 10,
+            "startup_seconds": 0.0
+          },
+          {
+            "delete_seconds": 0.035125,
+            "index_bytes": 122880,
+            "latest_fast_path": true,
+            "latest_resume_seconds": 0.040552,
+            "list_seconds": 0.006622,
+            "listed": 50,
+            "metadata_lookup_seconds": 0.000899,
+            "recall_hits": 5,
+            "recall_seconds": 0.005553,
+            "rename_seconds": 0.037252,
+            "search_backend": "fts5",
+            "search_seconds": 0.054804,
+            "session_files_loaded_for_list": 0,
+            "sessions": 100,
+            "startup_seconds": 0.0
+          },
+          {
+            "delete_seconds": 0.0677,
+            "index_bytes": 638976,
+            "latest_fast_path": true,
+            "latest_resume_seconds": 0.03589,
+            "list_seconds": 0.024925,
+            "listed": 50,
+            "metadata_lookup_seconds": 0.002998,
+            "recall_hits": 5,
+            "recall_seconds": 0.035693,
+            "rename_seconds": 0.070657,
+            "search_backend": "fts5",
+            "search_seconds": 0.11373,
+            "session_files_loaded_for_list": 0,
+            "sessions": 1000,
+            "startup_seconds": 0.0
+          }
+        ]
+      },
+      "peak_bytes": 179241,
+      "scenario": "catalog_latest_and_crud",
+      "status": "passed"
+    },
+    {
+      "category": "search_fts",
+      "elapsed_seconds": 27.115145,
+      "metrics": {
+        "canonical_history_bytes": 623160,
+        "database_bytes": 630784,
+        "fts_seconds": 0.053922,
+        "fts_session_files_loaded": 10,
+        "rebuild_seconds": 3.014285,
+        "result_materialization_count": 10,
+        "scan_seconds": 23.698141,
+        "scan_session_files_loaded": 999,
+        "search_backend": "fts5",
+        "sessions": 1000,
+        "speedup": 439.493
+      },
+      "peak_bytes": 3578973,
+      "scenario": "scan_fts_and_rebuild",
+      "status": "passed"
+    },
+    {
+      "category": "memory_summary",
+      "elapsed_seconds": 0.306585,
+      "metrics": {
+        "incremental_new_messages": 8,
+        "incremental_summary_seconds": 0.00208,
+        "initial_summary_seconds": 0.007619,
+        "memory_lookup_seconds": 0.021684,
+        "relevant_retrieval_seconds": 0.006744,
+        "restart_resume_seconds": 0.011044,
+        "summary_model_calls": 2,
+        "total_old_messages": 28,
+        "workspace_memory_items": 2
+      },
+      "peak_bytes": 51500,
+      "scenario": "retrieval_incremental_summary_and_restart",
+      "status": "passed"
+    },
+    {
+      "category": "tui_product",
+      "elapsed_seconds": 9.426508,
+      "metrics": {
+        "activity_burst_seconds": 1.101384,
+        "activity_chars": 0,
+        "cold_start_to_interactive_seconds": 4.16515,
+        "conversation_items": 2,
+        "conversation_rendered": true,
+        "created_session": true,
+        "no_crash": true,
+        "resize_seconds": 0.886923,
+        "session_switch_seconds": 0.475378
+      },
+      "peak_bytes": 8945755,
+      "scenario": "startup_render_activity_switch_and_resize",
+      "status": "passed"
+    },
+    {
+      "category": "coding_tasks",
+      "elapsed_seconds": 9.469046,
+      "metrics": {
+        "completed": 8,
+        "model_calls": 32,
+        "skipped": 0,
+        "subagent_calls": 3,
+        "tasks": [
+          {
+            "agent_steps": 6,
+            "elapsed_seconds": 1.623555,
+            "model_calls": 6,
+            "name": "simple_python_bugfix",
+            "protocol_status": "FINAL_RESPONSE",
+            "status": "passed",
+            "subagent_calls": 0,
+            "tool_calls": 5,
+            "verification_passed": true
+          },
+          {
+            "agent_steps": 6,
+            "elapsed_seconds": 1.729398,
+            "model_calls": 6,
+            "name": "multi_file_python_bugfix",
+            "protocol_status": "FINAL_RESPONSE",
+            "status": "passed",
+            "subagent_calls": 0,
+            "tool_calls": 6,
+            "verification_passed": true
+          },
+          {
+            "agent_steps": 4,
+            "elapsed_seconds": 0.743183,
+            "model_calls": 4,
+            "name": "add_tests",
+            "protocol_status": "FINAL_RESPONSE",
+            "status": "passed",
+            "subagent_calls": 0,
+            "tool_calls": 3,
+            "verification_passed": true
+          },
+          {
+            "agent_steps": 3,
+            "elapsed_seconds": 0.023205,
+            "model_calls": 3,
+            "name": "read_only_code_review",
+            "protocol_status": "FINAL_RESPONSE",
+            "status": "passed",
+            "subagent_calls": 0,
+            "tool_calls": 2,
+            "verification_passed": true
+          },
+          {
+            "agent_steps": 3,
+            "elapsed_seconds": 0.81481,
+            "model_calls": 3,
+            "name": "create_project",
+            "protocol_status": "FINAL_RESPONSE",
+            "status": "passed",
+            "subagent_calls": 0,
+            "tool_calls": 3,
+            "verification_passed": true
+          },
+          {
+            "agent_steps": 4,
+            "elapsed_seconds": 1.476156,
+            "model_calls": 4,
+            "name": "cpp_compile_test",
+            "protocol_status": "FINAL_RESPONSE",
+            "status": "passed",
+            "subagent_calls": 0,
+            "tool_calls": 3,
+            "verification_passed": true
+          },
+          {
+            "agent_steps": 4,
+            "elapsed_seconds": 0.046623,
+            "model_calls": 4,
+            "name": "repository_exploration",
+            "protocol_status": "FINAL_RESPONSE",
+            "status": "passed",
+            "subagent_calls": 0,
+            "tool_calls": 3,
+            "verification_passed": true
+          },
+          {
+            "agent_steps": 2,
+            "elapsed_seconds": 0.074237,
+            "model_calls": 2,
+            "name": "subagent_investigation",
+            "protocol_status": "FINAL_RESPONSE",
+            "status": "passed",
+            "subagent_calls": 3,
+            "tool_calls": 1,
+            "verification_passed": true
+          }
+        ],
+        "tool_calls": 26
+      },
+      "peak_bytes": 99394,
+      "scenario": "disposable_offline_tasks",
+      "status": "passed"
+    },
+    {
+      "category": "memory_usage",
+      "elapsed_seconds": 2.4e-05,
+      "metrics": {
+        "bounded_scenarios": 9,
+        "peak_bytes_by_category": {
+          "coding_tasks": 99394,
+          "context_scaling": 2645567,
+          "core_agent_loop": 49573,
+          "memory_summary": 51500,
+          "search_fts": 3578973,
+          "session_scaling": 179241,
+          "subagents": 82958,
+          "tool_execution": 96007,
+          "tui_product": 8945755
+        }
+      },
+      "peak_bytes": 256,
+      "scenario": "representative_scenario_peaks",
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "suite": "coding-agent-v1",
+  "timestamp": "2026-08-30T09:47:12.904263+00:00"
+}
