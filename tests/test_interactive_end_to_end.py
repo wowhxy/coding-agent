@@ -11,6 +11,7 @@ from coding_agent.cli import main
 from coding_agent.model import ModelClient
 from coding_agent.protocol import Message, ModelTurn, Role
 from coding_agent.session_store import JsonSessionStore
+from coding_agent.session_index import SessionIndex
 from coding_agent.system_prompt import SYSTEM_PROMPT
 from tests.fakes import FakeModelClient
 
@@ -185,11 +186,9 @@ def test_default_interactive_restart_resumes_disk_history(
     ]
     assert FAKE_PROVIDER_KEY not in session_text
 
-    index_paths = list((session_home / "workspaces").glob("*.json"))
-    assert len(index_paths) == 1
-    index_payload = json.loads(index_paths[0].read_text(encoding="utf-8"))
-    assert index_payload["latest_session_id"] == session_id
-    assert index_payload["session_ids"] == [session_id]
+    derived = SessionIndex(session_home, workspace.resolve())
+    assert derived.database_path.exists()
+    assert derived.latest_path.read_text(encoding="utf-8") == session_id + "\n"
 
 
 def test_new_explicit_resume_and_workspace_isolation_round_trip_on_disk(

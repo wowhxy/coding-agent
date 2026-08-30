@@ -124,6 +124,11 @@ def test_background_runtime_has_isolated_manager_and_submit_time_parent_plugins(
     )
 
     assert exit_code == 0
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not (
+        background_parent.closed and child.closed
+    ):
+        time.sleep(0.01)
     assert foreground.closed and background_parent.closed and child.closed
     parent_definitions = tuple(item.name for item in background_parent.calls[0][1])
     assert "delegate_tasks" in parent_definitions

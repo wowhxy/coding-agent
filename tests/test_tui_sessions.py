@@ -22,6 +22,7 @@ def test_session_sidebar_filters_switches_and_creates(tmp_path: Path) -> None:
             filter_input.value = "Tests"
             await pilot.pause()
             assert session_list.option_count == 1
+            assert service.session_search_queries == ["Tests"]
             filter_input.value = ""
             await pilot.pause()
             session_list.highlighted = 1

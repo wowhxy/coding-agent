@@ -122,6 +122,14 @@ class SessionActionRequested(Message):
         self.session_id = session_id
 
 
+class SessionSearchRequested(Message):
+    """Ask the application to run a bounded persisted-session search."""
+
+    def __init__(self, query: str) -> None:
+        super().__init__()
+        self.query = query
+
+
 class SessionOptionList(OptionList):
     """Session list with target-aware mouse and keyboard management."""
 
@@ -244,11 +252,25 @@ class SessionSidebar(Vertical):
 
     def update_sessions(self, sessions: Iterable[SessionView]) -> None:
         self._sessions = tuple(sessions)
-        self._apply_filter(self.query_one("#session-filter", Input).value)
+        query = self.query_one("#session-filter", Input).value.strip()
+        if query:
+            self.post_message(SessionSearchRequested(query))
+        else:
+            self._render_sessions(self._sessions)
+
+    def update_search_results(
+        self, query: str, sessions: Iterable[SessionView]
+    ) -> None:
+        if self.query_one("#session-filter", Input).value.strip() == query.strip():
+            self._render_sessions(tuple(sessions))
 
     @on(Input.Changed, "#session-filter")
     def _filter_changed(self, event: Input.Changed) -> None:
-        self._apply_filter(event.value)
+        query = event.value.strip()
+        if query:
+            self.post_message(SessionSearchRequested(query))
+        else:
+            self._render_sessions(self._sessions)
 
     @on(OptionList.OptionSelected, "#session-list")
     def _session_selected(self, event: OptionList.OptionSelected) -> None:
@@ -258,15 +280,7 @@ class SessionSidebar(Vertical):
         if callable(handler):
             handler(event.option_id)
 
-    def _apply_filter(self, query: str) -> None:
-        needle = query.strip().casefold()
-        visible = tuple(
-            item
-            for item in self._sessions
-            if not needle
-            or needle in item.display_name.casefold()
-            or needle in item.session_id.casefold()
-        )
+    def _render_sessions(self, visible: tuple[SessionView, ...]) -> None:
         options = [
             Option(
                 _session_label(item),

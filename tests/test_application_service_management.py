@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -9,7 +11,7 @@ import pytest
 from coding_agent.application.service import CodingAgentService
 from coding_agent.application.state import AgentState
 from coding_agent.config import RuntimeConfig
-from coding_agent.protocol import ModelTurn, ToolCall
+from coding_agent.protocol import Message, ModelTurn, Role, ToolCall
 from coding_agent.session import SessionError
 from coding_agent.session_store import JsonSessionStore
 from tests.fakes import FakeModelClient
@@ -81,6 +83,42 @@ def test_session_navigation_rename_delete_and_resume_are_transactional(tmp_path:
     active = next(item for item in resumed.snapshot().sessions if item.active)
     assert active.display_name == "second"
     resumed.close()
+
+
+def test_product_session_page_is_bounded_and_catalog_only(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home"
+    workspace.mkdir()
+    ids = iter(f"{index:012x}" for index in range(1, 90))
+    moments = iter(
+        datetime(2026, 8, 30, tzinfo=timezone.utc) + timedelta(seconds=index)
+        for index in range(200)
+    )
+    store = JsonSessionStore(
+        home,
+        clock=lambda: next(moments),
+        id_generator=lambda: next(ids),
+    )
+    for index in range(75):
+        store.save(
+            replace(
+                store.create_session(workspace, "fake", "model"),
+                messages=(Message(Role.USER, f"task {index}"),),
+            )
+        )
+
+    service = CodingAgentService.create(
+        _config(workspace),
+        "custom",
+        home,
+        lambda *_args: FakeModelClient([]),
+    )
+    sessions = service.list_sessions()
+
+    assert len(sessions) == 50
+    assert service.store.last_report.full_history_files_loaded == 0
+    assert service.store.last_report.catalog_entries_loaded == 50
+    service.close()
 
 
 def test_session_management_can_target_a_non_active_session(tmp_path: Path) -> None:

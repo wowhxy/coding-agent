@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import coding_agent.session_store as session_store
+from coding_agent.session_index import SessionIndex
 from coding_agent.context import ConversationHistory
 from coding_agent.interactive import InteractiveSession
 from coding_agent.interactive_shell import InteractiveShell
@@ -84,7 +85,7 @@ def test_delete_latest_selects_previous_and_delete_last_leaves_empty_index(tmp_p
     assert store.load_latest(workspace) is None
 
 
-def test_delete_restores_session_when_index_update_fails(
+def test_delete_remains_canonical_when_derived_index_update_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -94,20 +95,18 @@ def test_delete_restores_session_when_index_update_fails(
     saved = store.save(
         replace(store.create_session(workspace, "p", "m"), messages=(Message(Role.USER, "task"),))
     )
-    real_write = session_store._atomic_write_text
+    monkeypatch.setattr(
+        SessionIndex,
+        "remove",
+        lambda _self, _session_id: (_ for _ in ()).throw(
+            PermissionError("private host detail")
+        ),
+    )
 
-    def fail_index(path: Path, text: str) -> None:
-        if path.parent.name == "workspaces":
-            raise PermissionError("private host detail")
-        real_write(path, text)
-
-    monkeypatch.setattr(session_store, "_atomic_write_text", fail_index)
-
+    assert store.delete_session(saved.session_id, workspace) is None
     with pytest.raises(SessionError) as raised:
-        store.delete_session(saved.session_id, workspace)
-
-    assert raised.value.error_code == "SESSION_SAVE_FAILED"
-    assert store.load_session(saved.session_id, workspace) == saved
+        store.load_session(saved.session_id, workspace)
+    assert raised.value.error_code == "SESSION_NOT_FOUND"
 
 
 class _Runner:

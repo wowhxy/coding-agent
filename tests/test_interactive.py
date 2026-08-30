@@ -15,6 +15,7 @@ from coding_agent.interactive import InteractiveSession
 from coding_agent.protocol import Message, ModelTurn, Role, RunResult, RunStatus, ToolCall
 from coding_agent.session import SessionError, SessionNameSource, SessionRecord
 from coding_agent.session_store import JsonSessionStore
+from coding_agent.session_index import SessionIndex
 from coding_agent.tools.registry import ToolRegistry
 from fakes import FakeModelClient
 
@@ -350,7 +351,7 @@ def test_committed_nonfinal_status_persists_complete_tool_call_and_result_pair(
     )
 
 
-def test_index_partial_save_error_reports_saved_session_and_unupdated_index(
+def test_derived_index_failure_does_not_fail_committed_interactive_turn(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -363,14 +364,13 @@ def test_index_partial_save_error_reports_saved_session_and_unupdated_index(
         id_generator=lambda: "012345abcdef",
     )
     selected = store.create_session(workspace, "provider", "model")
-    real_atomic_write = session_store._atomic_write_text
-
-    def fail_index(path: Path, text: str) -> None:
-        if path.parent.name == "workspaces":
-            raise PermissionError("index replacement failed")
-        real_atomic_write(path, text)
-
-    monkeypatch.setattr(session_store, "_atomic_write_text", fail_index)
+    monkeypatch.setattr(
+        SessionIndex,
+        "upsert",
+        lambda _self, _record: (_ for _ in ()).throw(
+            PermissionError("index update failed")
+        ),
+    )
     output: list[str] = []
     interactive = InteractiveSession(
         runner=ScriptedRunner([RunStatus.FINAL_RESPONSE]),  # type: ignore[arg-type]
@@ -380,16 +380,14 @@ def test_index_partial_save_error_reports_saved_session_and_unupdated_index(
         provider="provider",
         model="model",
         sensitive_values=(SECRET,),
-        input_reader=inputs("task"),
+        input_reader=inputs("task", "/exit"),
         output=output.append,
     )
 
-    assert interactive.run() == 7
-    assert output == [
-        "[error] SESSION_SAVE_FAILED: "
-        "session was saved but workspace index was not updated"
-    ]
+    assert interactive.run() == 0
+    assert output == []
     assert (root / "sessions" / "012345abcdef.json").is_file()
+    assert SessionIndex(root, workspace.resolve()).stale_path.exists()
 
 
 def test_internal_error_discards_turn_and_next_turn_starts_from_prior_history(tmp_path: Path) -> None:

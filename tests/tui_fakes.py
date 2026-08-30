@@ -52,6 +52,7 @@ class FakeProductService:
         self.skill_actions: list[tuple[str, str]] = []
         self.plugin_actions: list[tuple[str, str]] = []
         self.recall_queries: list[str] = []
+        self.session_search_queries: list[str] = []
         self.candidate_decisions: list[tuple[str, bool]] = []
         self.blocking = blocking
         self.started = threading.Event()
@@ -202,6 +203,7 @@ class FakeProductService:
         )
 
     def search_sessions(self, query: str) -> tuple[SessionView, ...]:
+        self.session_search_queries.append(query)
         needle = query.casefold()
         return tuple(item for item in self._sessions if needle in item.display_name.casefold())
 

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -22,6 +23,15 @@ from .session import (
     SessionRecord,
     deserialize_session,
     serialize_session,
+)
+from .session_index import FtsUnavailableError, SessionIndex
+from .session_search import (
+    SearchLocator,
+    SessionSearchResult,
+    bounded_snippet,
+    matches_document,
+    materialize_document,
+    searchable_documents,
 )
 
 
@@ -39,6 +49,19 @@ class SessionSummary:
     name: str | None
     updated_at: datetime
     is_latest: bool
+
+
+@dataclass(slots=True)
+class SessionStoreReport:
+    """Content-free counters for the most recent store operation."""
+
+    latest_fast_path_used: bool = False
+    session_files_loaded: int = 0
+    full_history_files_loaded: int = 0
+    catalog_entries_loaded: int = 0
+    search_backend: str = "none"
+    search_hits: int = 0
+    index_rebuilt: bool = False
 
 
 def resolve_session_home(environ: Mapping[str, str] | None = None) -> Path:
@@ -86,6 +109,7 @@ class JsonSessionStore:
         self._clock = clock
         self._id_generator = id_generator
         self._lock = threading.RLock()
+        self.last_report = SessionStoreReport()
 
     def create_session(self, workspace: Path, provider: str, model: str) -> SessionRecord:
         with self._lock:
@@ -124,41 +148,82 @@ class JsonSessionStore:
 
     def load_latest(self, workspace: Path) -> SessionRecord | None:
         with self._lock:
+            self._reset_report()
             canonical = _canonical_workspace(workspace)
             self._validate_root(canonical)
-            index = self._read_index(canonical, missing_ok=True)
-            if index is None or index["latest_session_id"] is None:
-                return None
-            return self.load_session(index["latest_session_id"], canonical)
+            pointer = self._read_latest_pointer(canonical)
+            if pointer is not None:
+                try:
+                    record = self._load_session(pointer, canonical)
+                except SessionError as error:
+                    if error.error_code not in {
+                        "SESSION_NOT_FOUND",
+                        "SESSION_CORRUPT",
+                        "SESSION_VERSION_UNSUPPORTED",
+                        "SESSION_WORKSPACE_MISMATCH",
+                        "SESSION_IO_ERROR",
+                    }:
+                        raise
+                else:
+                    self.last_report.latest_fast_path_used = True
+                    return record
+
+            index = self._ensure_index(canonical)
+            for latest in index.latest_candidates():
+                try:
+                    record = self._load_session(latest, canonical)
+                except SessionError as error:
+                    if error.error_code in {
+                        "SESSION_NOT_FOUND",
+                        "SESSION_CORRUPT",
+                        "SESSION_VERSION_UNSUPPORTED",
+                        "SESSION_WORKSPACE_MISMATCH",
+                        "SESSION_IO_ERROR",
+                    }:
+                        continue
+                    raise
+                index.set_latest(latest)
+                self._write_latest_pointer(canonical, latest)
+                return record
+            index.set_latest(None)
+            self._clear_latest_pointer(canonical)
+            return None
 
     def load_session(self, session_id: str, workspace: Path) -> SessionRecord:
         with self._lock:
+            self._reset_report()
             canonical = _canonical_workspace(workspace)
             self._validate_root(canonical)
-            if type(session_id) is not str or _SESSION_ID.fullmatch(session_id) is None:
-                raise SessionError("SESSION_NOT_FOUND", "session was not found")
-            try:
-                text = self._session_path(session_id).read_text(encoding="utf-8")
-            except FileNotFoundError:
-                raise SessionError("SESSION_NOT_FOUND", "session was not found") from None
-            except UnicodeDecodeError:
-                raise SessionError("SESSION_CORRUPT", "session document is not valid UTF-8") from None
-            except OSError:
-                raise SessionError("SESSION_IO_ERROR", "session could not be read") from None
-            record = deserialize_session(text)
-            if record.session_id != session_id:
-                raise SessionError(
-                    "SESSION_CORRUPT",
-                    "session identifier does not match requested session",
-                )
-            if _workspace_identity(record.workspace) != _workspace_identity(canonical):
-                raise SessionError(
-                    "SESSION_WORKSPACE_MISMATCH", "session belongs to a different workspace"
-                )
-            return record
+            return self._load_session(session_id, canonical)
+
+    def _load_session(self, session_id: str, workspace: Path) -> SessionRecord:
+        if type(session_id) is not str or _SESSION_ID.fullmatch(session_id) is None:
+            raise SessionError("SESSION_NOT_FOUND", "session was not found")
+        self.last_report.session_files_loaded += 1
+        self.last_report.full_history_files_loaded += 1
+        try:
+            text = self._session_path(session_id).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise SessionError("SESSION_NOT_FOUND", "session was not found") from None
+        except UnicodeDecodeError:
+            raise SessionError("SESSION_CORRUPT", "session document is not valid UTF-8") from None
+        except OSError:
+            raise SessionError("SESSION_IO_ERROR", "session could not be read") from None
+        record = deserialize_session(text)
+        if record.session_id != session_id:
+            raise SessionError(
+                "SESSION_CORRUPT",
+                "session identifier does not match requested session",
+            )
+        if _workspace_identity(record.workspace) != _workspace_identity(workspace):
+            raise SessionError(
+                "SESSION_WORKSPACE_MISMATCH", "session belongs to a different workspace"
+            )
+        return record
 
     def save(self, record: SessionRecord) -> SessionRecord:
         with self._lock:
+            self._reset_report()
             return self._save(record)
 
     def _save(
@@ -175,28 +240,36 @@ class JsonSessionStore:
         except SessionError:
             raise SessionError("SESSION_SAVE_FAILED", "session could not be saved") from None
 
-        current = self._read_index(canonical, missing_ok=True)
-        session_ids = [] if current is None else list(current["session_ids"])
-        previous_latest = None if current is None else current["latest_session_id"]
-        session_ids = [item for item in session_ids if item != persisted.session_id]
-        session_ids.append(persisted.session_id)
-        latest = (
-            persisted.session_id
-            if make_latest or previous_latest is None
-            else previous_latest
-        )
-        index_text = _serialize_index(canonical, latest, session_ids)
         try:
             _atomic_write_text(self._session_path(persisted.session_id), session_text)
         except (OSError, ValueError):
             raise SessionError("SESSION_SAVE_FAILED", "session could not be saved") from None
+
+        index = SessionIndex(self.root, canonical)
         try:
-            _atomic_write_text(self._index_path(canonical), index_text)
-        except (OSError, ValueError):
-            raise SessionError(
-                "SESSION_SAVE_FAILED",
-                "session was saved but workspace index was not updated",
-            ) from None
+            self._ensure_index(canonical, index=index)
+            index.upsert(persisted)
+            previous_latest = index.latest()
+            latest = (
+                persisted.session_id
+                if make_latest or previous_latest is None
+                else previous_latest
+            )
+            index.set_latest(latest)
+        except (OSError, sqlite3.Error, ValueError):
+            try:
+                index.mark_stale()
+            except (OSError, ValueError):
+                pass
+            latest = persisted.session_id if make_latest else self._read_latest_pointer(canonical)
+        if latest is not None:
+            try:
+                self._write_latest_pointer(canonical, latest)
+            except (OSError, ValueError):
+                try:
+                    index.mark_stale()
+                except (OSError, ValueError):
+                    pass
         return persisted
 
     def rename_session(
@@ -229,107 +302,318 @@ class JsonSessionStore:
         """Delete one persisted session and return the next latest record."""
 
         with self._lock:
+            self._reset_report()
             canonical = _canonical_workspace(workspace)
             self._validate_root(canonical)
-            record = self.load_session(session_id, canonical)
-            index = self._read_index(canonical, missing_ok=False)
-            assert index is not None
-            if session_id not in index["session_ids"]:
-                raise SessionError("SESSION_NOT_FOUND", "session was not found")
-            remaining = [item for item in index["session_ids"] if item != session_id]
-            latest = remaining[-1] if remaining else None
+            record = self._load_session(session_id, canonical)
             source = self._session_path(record.session_id)
             tombstone = source.with_name(f".{source.name}.deleted")
             try:
                 os.replace(source, tombstone)
             except OSError:
                 raise SessionError("SESSION_SAVE_FAILED", "session could not be deleted") from None
+            index = SessionIndex(self.root, canonical)
+            latest: str | None = None
             try:
-                _atomic_write_text(
-                    self._index_path(canonical),
-                    _serialize_index(canonical, latest, remaining),
-                )
-            except (OSError, ValueError):
+                self._ensure_index(canonical, index=index)
+                index.remove(session_id)
+                latest = index.latest()
+            except (OSError, sqlite3.Error, ValueError):
                 try:
-                    os.replace(tombstone, source)
-                except OSError:
+                    index.mark_stale()
+                except (OSError, ValueError):
                     pass
-                raise SessionError(
-                    "SESSION_SAVE_FAILED", "session could not be deleted"
-                ) from None
+                records = tuple(self._records_for_rebuild(canonical))
+                latest = (
+                    max(
+                        records, key=lambda item: (item.updated_at, item.session_id)
+                    ).session_id
+                    if records
+                    else None
+                )
             try:
                 tombstone.unlink()
             except FileNotFoundError:
                 pass
             except OSError:
                 pass
-            return self.load_session(latest, canonical) if latest is not None else None
+            try:
+                if latest is None:
+                    self._clear_latest_pointer(canonical)
+                else:
+                    self._write_latest_pointer(canonical, latest)
+            except (OSError, ValueError):
+                try:
+                    index.mark_stale()
+                except (OSError, ValueError):
+                    pass
+            return self._load_session(latest, canonical) if latest is not None else None
 
-    def list_sessions(self, workspace: Path) -> tuple[SessionSummary, ...]:
-        """List all sessions for one workspace, newest first."""
+    def list_sessions(
+        self,
+        workspace: Path,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[SessionSummary, ...]:
+        """List a lightweight metadata page for one workspace, newest first."""
 
+        if limit is not None and (type(limit) is not int or limit <= 0):
+            raise SessionError("SESSION_LIST_INVALID", "session list limit is invalid")
+        if type(offset) is not int or offset < 0:
+            raise SessionError("SESSION_LIST_INVALID", "session list offset is invalid")
         with self._lock:
+            self._reset_report()
             canonical = _canonical_workspace(workspace)
             self._validate_root(canonical)
-            index = self._read_index(canonical, missing_ok=True)
-            if index is None:
-                return ()
-            latest = index["latest_session_id"]
-            records = [self.load_session(item, canonical) for item in index["session_ids"]]
-            records.sort(key=lambda item: item.updated_at, reverse=True)
+            index = self._ensure_index(canonical)
+            latest = self._read_latest_pointer(canonical)
+            if latest is None or not index.contains(latest):
+                latest = index.latest()
+                if latest is not None:
+                    try:
+                        self._write_latest_pointer(canonical, latest)
+                    except (OSError, ValueError):
+                        pass
+            entries = index.list(limit=limit, offset=offset)
+            self.last_report.catalog_entries_loaded = len(entries)
             return tuple(
                 SessionSummary(
-                    session_id=record.session_id,
-                    name=record.name,
-                    updated_at=record.updated_at,
-                    is_latest=record.session_id == latest,
+                    session_id=entry.session_id,
+                    name=entry.name,
+                    updated_at=entry.updated_at,
+                    is_latest=entry.session_id == latest,
                 )
-                for record in records
+                for entry in entries
             )
 
     def search_sessions(
-        self, workspace: Path, query: str
+        self, workspace: Path, query: str, *, limit: int = 20
     ) -> tuple[SessionSummary, ...]:
-        """Search names and persisted protocol text within one workspace."""
+        """Return one lightweight catalog result per matching session."""
+
+        results = self.search_session_results(workspace, query, limit=limit)
+        latest = self._read_latest_pointer(_canonical_workspace(workspace))
+        seen: set[str] = set()
+        summaries: list[SessionSummary] = []
+        for result in results:
+            if result.session_id in seen:
+                continue
+            seen.add(result.session_id)
+            summaries.append(
+                SessionSummary(
+                    result.session_id,
+                    result.name,
+                    result.updated_at,
+                    result.session_id == latest,
+                )
+            )
+        return tuple(summaries)
+
+    def search_session_results(
+        self,
+        workspace: Path,
+        query: str,
+        *,
+        limit: int = 20,
+        exclude_session_id: str | None = None,
+        fts_enabled: bool = True,
+    ) -> tuple[SessionSearchResult, ...]:
+        """Locate first, then materialize only bounded canonical excerpts."""
 
         if type(query) is not str or not query.strip():
             raise SessionError("SESSION_SEARCH_INVALID", "search query is required")
-        needle = query.strip().casefold()
+        if type(limit) is not int or not 1 <= limit <= 20:
+            raise SessionError("SESSION_SEARCH_INVALID", "search result limit is invalid")
         with self._lock:
+            self._reset_report()
             canonical = _canonical_workspace(workspace)
             self._validate_root(canonical)
-            summaries = self.list_sessions(canonical)
-            matches: list[SessionSummary] = []
-            for summary in summaries:
-                record = self.load_session(summary.session_id, canonical)
-                if needle in _session_search_text(record).casefold():
-                    matches.append(summary)
-            return tuple(matches)
-
-    def load_recall_records(self, workspace: Path) -> tuple[SessionRecord, ...]:
-        """Load same-workspace canonical sessions, skipping malformed individuals."""
-
-        with self._lock:
-            canonical = _canonical_workspace(workspace)
-            self._validate_root(canonical)
-            index = self._read_index(canonical, missing_ok=True)
-            if index is None:
-                return ()
-            records: list[SessionRecord] = []
-            for session_id in index["session_ids"]:
+            index = self._ensure_index(canonical)
+            if fts_enabled:
                 try:
-                    records.append(self.load_session(session_id, canonical))
-                except SessionError as error:
-                    if error.error_code in {
-                        "SESSION_NOT_FOUND",
-                        "SESSION_CORRUPT",
-                        "SESSION_VERSION_UNSUPPORTED",
-                        "SESSION_WORKSPACE_MISMATCH",
-                        "SESSION_IO_ERROR",
-                    }:
-                        continue
-                    raise
-            return tuple(records)
+                    locators = index.search(
+                        query,
+                        limit=limit,
+                        exclude_session_id=exclude_session_id,
+                    )
+                except FtsUnavailableError:
+                    locators = ()
+                    fts_enabled = False
+                except (OSError, sqlite3.Error, ValueError):
+                    try:
+                        index.mark_stale()
+                        index = self._ensure_index(canonical, index=index)
+                        locators = index.search(
+                            query,
+                            limit=limit,
+                            exclude_session_id=exclude_session_id,
+                        )
+                    except (OSError, sqlite3.Error, ValueError, FtsUnavailableError):
+                        locators = ()
+                        fts_enabled = False
+            else:
+                locators = ()
+
+            results = (
+                self._materialize_locators(canonical, locators, limit)
+                if fts_enabled
+                else self._scan_search(
+                    canonical,
+                    index,
+                    query,
+                    limit=limit,
+                    exclude_session_id=exclude_session_id,
+                )
+            )
+            self.last_report.search_backend = "fts5" if fts_enabled else "scan"
+            self.last_report.search_hits = len(results)
+            return results
+
+    def _materialize_locators(
+        self,
+        workspace: Path,
+        locators: tuple[SearchLocator, ...],
+        limit: int,
+    ) -> tuple[SessionSearchResult, ...]:
+        records: dict[str, SessionRecord | None] = {}
+        results: list[SessionSearchResult] = []
+        for locator in locators:
+            if locator.session_id not in records:
+                try:
+                    records[locator.session_id] = self._load_session(
+                        locator.session_id, workspace
+                    )
+                except SessionError:
+                    records[locator.session_id] = None
+            record = records[locator.session_id]
+            if record is None:
+                continue
+            text = materialize_document(record, locator.ordinal, locator.source)
+            if not text:
+                continue
+            results.append(
+                SessionSearchResult(
+                    record.session_id,
+                    record.name,
+                    record.updated_at,
+                    bounded_snippet(text),
+                    -locator.rank,
+                    locator.ordinal,
+                    locator.source,
+                )
+            )
+            if len(results) == limit:
+                break
+        return tuple(results)
+
+    def _scan_search(
+        self,
+        workspace: Path,
+        index: SessionIndex,
+        query: str,
+        *,
+        limit: int,
+        exclude_session_id: str | None,
+    ) -> tuple[SessionSearchResult, ...]:
+        ranked: list[SessionSearchResult] = []
+        for entry in index.list(limit=None, offset=0):
+            if entry.session_id == exclude_session_id:
+                continue
+            try:
+                record = self._load_session(entry.session_id, workspace)
+            except SessionError:
+                continue
+            for document in searchable_documents(record):
+                matched, score = matches_document(document, query)
+                if matched:
+                    ranked.append(
+                        SessionSearchResult(
+                            record.session_id,
+                            record.name,
+                            record.updated_at,
+                            bounded_snippet(document.text),
+                            score,
+                            document.ordinal,
+                            document.source,
+                        )
+                    )
+        ranked.sort(
+            key=lambda item: (
+                -item.score,
+                -item.updated_at.timestamp(),
+                item.session_id,
+                item.ordinal,
+            )
+        )
+        return tuple(ranked[:limit])
+
+    def latest_pointer_path(self, workspace: Path) -> Path:
+        """Return the workspace-scoped tiny latest pointer path."""
+
+        canonical = _canonical_workspace(workspace)
+        self._validate_root(canonical)
+        return SessionIndex(self.root, canonical).latest_path
+
+    def _reset_report(self) -> None:
+        self.last_report = SessionStoreReport()
+
+    def _ensure_index(
+        self, workspace: Path, *, index: SessionIndex | None = None
+    ) -> SessionIndex:
+        selected = index or SessionIndex(self.root, workspace)
+        rebuilt = selected.ensure(
+            self._records_for_rebuild(workspace),
+            latest_hint=lambda: self._legacy_latest_hint(workspace),
+        )
+        self.last_report.index_rebuilt = self.last_report.index_rebuilt or rebuilt
+        return selected
+
+    def _records_for_rebuild(self, workspace: Path):
+        sessions = self.root / "sessions"
+        try:
+            paths = sorted(sessions.glob("*.json"))
+        except OSError:
+            return
+        for path in paths:
+            self.last_report.session_files_loaded += 1
+            self.last_report.full_history_files_loaded += 1
+            try:
+                record = deserialize_session(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, SessionError):
+                continue
+            if _workspace_identity(record.workspace) == _workspace_identity(workspace):
+                yield record
+
+    def _legacy_latest_hint(self, workspace: Path) -> str | None:
+        try:
+            index = self._read_index(workspace, missing_ok=True)
+        except SessionError:
+            return None
+        return None if index is None else index["latest_session_id"]
+
+    def _read_latest_pointer(self, workspace: Path) -> str | None:
+        path = SessionIndex(self.root, workspace).latest_path
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (FileNotFoundError, UnicodeDecodeError, OSError):
+            return None
+        if text.endswith("\n"):
+            text = text[:-1]
+        if _SESSION_ID.fullmatch(text) is None:
+            return None
+        return text
+
+    def _write_latest_pointer(self, workspace: Path, session_id: str) -> None:
+        if _SESSION_ID.fullmatch(session_id) is None:
+            raise ValueError("invalid session id")
+        _atomic_write_text(SessionIndex(self.root, workspace).latest_path, session_id + "\n")
+
+    def _clear_latest_pointer(self, workspace: Path) -> None:
+        try:
+            SessionIndex(self.root, workspace).latest_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _validate_root(self, workspace: Path) -> None:
         self.root = _canonical_session_root(self.root)
@@ -423,30 +707,6 @@ def _valid_index(document: Any, workspace: Path) -> bool:
     if len(set(identifiers)) != len(identifiers) or latest not in identifiers:
         return False
     return True
-
-
-def _serialize_index(
-    workspace: Path, latest_session_id: str | None, session_ids: list[str]
-) -> str:
-    return json.dumps(
-        {
-            "schema_version": _INDEX_SCHEMA_VERSION,
-            "workspace": str(workspace),
-            "latest_session_id": latest_session_id,
-            "session_ids": session_ids,
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
-def _session_search_text(record: SessionRecord) -> str:
-    values = [record.name or ""]
-    for message in record.messages:
-        values.extend((message.content or "", message.tool_call_id or ""))
-        for call in message.tool_calls:
-            values.extend((call.id, call.name, call.arguments_json))
-    return "\n".join(values)
 
 
 def _is_aware_utc(value: Any) -> bool:

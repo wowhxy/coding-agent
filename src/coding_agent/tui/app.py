@@ -63,6 +63,7 @@ from .widgets import (
     SessionActionRequested,
     SessionContextMenu,
     SessionContextRequested,
+    SessionSearchRequested,
     SessionSidebar,
     SlashCommandSuggestions,
 )
@@ -370,6 +371,17 @@ class CodingAgentApp(App[None]):
             self._request_session_rename(message.session_id)
         elif message.action == "delete" and message.session_id is not None:
             self._request_session_delete(message.session_id)
+
+    @on(SessionSearchRequested)
+    def _session_search_requested(self, message: SessionSearchRequested) -> None:
+        try:
+            results = self.service.search_sessions(message.query)
+        except Exception as exc:
+            self._show_product_error(exc)
+            return
+        self.query_one("#session-sidebar", SessionSidebar).update_search_results(
+            message.query, results
+        )
 
     def on_click(self, event: events.Click) -> None:
         menu = self.query_one("#session-context-menu", SessionContextMenu)

@@ -20,6 +20,7 @@ from coding_agent.session_store import (
     generate_session_id,
     resolve_session_home,
 )
+from coding_agent.session_index import SessionIndex
 import coding_agent.session_store as session_store
 
 
@@ -292,15 +293,14 @@ def test_save_layout_index_schema_and_loading_across_workspaces(tmp_path: Path) 
     assert (root / "sessions" / "111111111111.json").is_file()
     assert (root / "sessions" / "222222222222.json").is_file()
     assert (root / "sessions" / "333333333333.json").is_file()
-    index_path = root / "workspaces" / f"{workspace_hash(workspace_a)}.json"
-    assert len(index_path.stem) == 64
-    index = json.loads(index_path.read_text(encoding="utf-8"))
-    assert index == {
-        "schema_version": 2,
-        "workspace": str(workspace_a.resolve()),
-        "latest_session_id": "222222222222",
-        "session_ids": ["111111111111", "222222222222"],
-    }
+    derived = SessionIndex(root, workspace_a.resolve())
+    assert len(derived.directory.name) == 64
+    assert derived.database_path.is_file()
+    assert derived.latest_path.read_text(encoding="utf-8") == "222222222222\n"
+    assert [item.session_id for item in store.list_sessions(workspace_a)] == [
+        "111111111111",
+        "222222222222",
+    ]
     assert store.load_latest(workspace_a) == saved_second
     assert store.load_session("111111111111", workspace_a) == saved_first
     assert store.load_latest(workspace_b) == saved_other
@@ -325,14 +325,19 @@ def test_resaving_old_session_moves_it_to_latest_without_duplicate(tmp_path: Pat
 
     saved_again = store.save(with_messages(first, "first revised"))
 
-    index_path = root / "workspaces" / f"{workspace_hash(workspace)}.json"
-    index = json.loads(index_path.read_text(encoding="utf-8"))
-    assert index["session_ids"] == ["222222222222", "111111111111"]
-    assert index["latest_session_id"] == "111111111111"
+    summaries = store.list_sessions(workspace)
+    assert {item.session_id for item in summaries} == {
+        "111111111111",
+        "222222222222",
+    }
+    assert len(summaries) == 2
+    assert SessionIndex(root, workspace.resolve()).latest_path.read_text(
+        encoding="utf-8"
+    ) == "111111111111\n"
     assert store.load_latest(workspace) == saved_again
 
 
-def test_load_latest_returns_none_only_when_index_is_absent(tmp_path: Path) -> None:
+def test_dangling_legacy_index_recovers_to_empty_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = JsonSessionStore(tmp_path / "store")
@@ -340,7 +345,7 @@ def test_load_latest_returns_none_only_when_index_is_absent(tmp_path: Path) -> N
     assert store.load_latest(workspace) is None
 
     index_path = store.root / "workspaces" / f"{workspace_hash(workspace)}.json"
-    index_path.parent.mkdir(parents=True)
+    index_path.parent.mkdir(parents=True, exist_ok=True)
     index_path.write_text(
         json.dumps(
             {
@@ -352,7 +357,8 @@ def test_load_latest_returns_none_only_when_index_is_absent(tmp_path: Path) -> N
         ),
         encoding="utf-8",
     )
-    assert_error("SESSION_NOT_FOUND", lambda: store.load_latest(workspace))
+    assert store.load_latest(workspace) is None
+    assert SessionIndex(store.root, workspace.resolve()).database_path.exists()
 
 
 def test_explicit_load_validates_id_and_requested_workspace(tmp_path: Path) -> None:
@@ -409,13 +415,10 @@ def test_load_rejects_session_document_id_that_does_not_match_requested_filename
         "SESSION_CORRUPT",
         lambda: store.load_session(requested_id, workspace),
     )
-    latest_error = assert_error(
-        "SESSION_CORRUPT",
-        lambda: store.load_latest(workspace),
-    )
+    latest = store.load_latest(workspace)
 
     assert explicit_error.message == "session identifier does not match requested session"
-    assert latest_error.message == "session identifier does not match requested session"
+    assert latest is None
 
 
 @pytest.mark.parametrize(
@@ -430,7 +433,7 @@ def test_load_rejects_session_document_id_that_does_not_match_requested_filename
         lambda doc: doc.update({"session_ids": ["222222222222"]}),
     ],
 )
-def test_load_latest_rejects_malformed_or_wrong_workspace_index(
+def test_load_latest_ignores_malformed_legacy_index_and_rebuilds_derived_state(
     tmp_path: Path, mutate
 ) -> None:
     root = tmp_path / "store"
@@ -449,10 +452,12 @@ def test_load_latest_rejects_malformed_or_wrong_workspace_index(
     index_path.parent.mkdir(parents=True)
     index_path.write_text(json.dumps(document), encoding="utf-8")
 
-    assert_error("SESSION_INDEX_CORRUPT", lambda: JsonSessionStore(root).load_latest(workspace))
+    store = JsonSessionStore(root)
+    assert store.load_latest(workspace) is None
+    assert SessionIndex(root, workspace.resolve()).database_path.exists()
 
 
-def test_load_latest_rejects_malformed_index_json(tmp_path: Path) -> None:
+def test_load_latest_ignores_malformed_legacy_json(tmp_path: Path) -> None:
     root = tmp_path / "store"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -460,11 +465,11 @@ def test_load_latest_rejects_malformed_index_json(tmp_path: Path) -> None:
     index_path.parent.mkdir(parents=True)
     index_path.write_text("{", encoding="utf-8")
 
-    assert_error("SESSION_INDEX_CORRUPT", lambda: JsonSessionStore(root).load_latest(workspace))
+    assert JsonSessionStore(root).load_latest(workspace) is None
 
 
 @pytest.mark.parametrize("constant", ("NaN", "Infinity", "-Infinity"))
-def test_load_latest_rejects_nonstandard_json_constants_before_duplicate_key_overwrite(
+def test_latest_fast_path_does_not_parse_malformed_legacy_json(
     tmp_path: Path,
     constant: str,
 ) -> None:
@@ -477,17 +482,18 @@ def test_load_latest_rejects_nonstandard_json_constants_before_duplicate_key_ove
         id_generator=lambda: "111111111111",
     )
     store.save(with_messages(store.create_session(workspace, "provider", "model")))
+    saved = store.load_latest(workspace)
+    assert saved is not None
     index_path = root / "workspaces" / f"{workspace_hash(workspace)}.json"
-    saved_index = index_path.read_text(encoding="utf-8")
-    nonstandard_index = saved_index.replace(
-        '"schema_version": 2,',
-        f'"schema_version": {constant}, "schema_version": 2,',
-        1,
+    index_path.write_text(
+        '{"schema_version": '
+        + constant
+        + ', "schema_version": 2, "workspace": "invalid"}',
+        encoding="utf-8",
     )
-    assert nonstandard_index != saved_index
-    index_path.write_text(nonstandard_index, encoding="utf-8")
 
-    assert_error("SESSION_INDEX_CORRUPT", lambda: store.load_latest(workspace))
+    loaded = JsonSessionStore(root).load_latest(workspace)
+    assert loaded is not None and loaded.session_id == saved.session_id
 
 
 def test_session_codec_errors_are_preserved_by_explicit_load(tmp_path: Path) -> None:
@@ -522,7 +528,7 @@ def test_invalid_utf8_session_is_concise_corrupt_error(tmp_path: Path) -> None:
     assert "invalid start byte" not in str(error)
 
 
-def test_invalid_utf8_index_is_concise_index_corrupt_error(tmp_path: Path) -> None:
+def test_invalid_utf8_legacy_index_is_ignored_during_recovery(tmp_path: Path) -> None:
     root = tmp_path / "store"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -530,11 +536,7 @@ def test_invalid_utf8_index_is_concise_index_corrupt_error(tmp_path: Path) -> No
     index_path.parent.mkdir(parents=True)
     index_path.write_bytes(b"\xffhost-detail-secret")
 
-    error = assert_error(
-        "SESSION_INDEX_CORRUPT", lambda: JsonSessionStore(root).load_latest(workspace)
-    )
-    assert "host-detail-secret" not in str(error)
-    assert "invalid start byte" not in str(error)
+    assert JsonSessionStore(root).load_latest(workspace) is None
 
 
 def test_read_filesystem_error_is_concise_io_error(
@@ -592,7 +594,7 @@ def test_session_replace_failure_preserves_target_and_cleans_only_its_temp(
     assert {path.name for path in target.parent.iterdir()} == {target.name, unrelated.name}
 
 
-def test_index_replace_failure_leaves_new_session_readable_and_old_index_unchanged(
+def test_derived_index_failure_leaves_new_canonical_session_readable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     root = tmp_path / "store"
@@ -606,24 +608,18 @@ def test_index_replace_failure_leaves_new_session_readable_and_old_index_unchang
     )
     first = store.create_session(workspace, "p", "m")
     store.save(with_messages(first, "first"))
-    index_path = root / "workspaces" / f"{workspace_hash(workspace)}.json"
-    old_index = index_path.read_bytes()
     second = store.create_session(workspace, "p2", "m2")
-    real_atomic_write = session_store._atomic_write_text
-    calls: list[Path] = []
+    monkeypatch.setattr(
+        SessionIndex,
+        "upsert",
+        lambda _self, _record: (_ for _ in ()).throw(
+            PermissionError("host-detail-secret")
+        ),
+    )
 
-    def fail_index(path: Path, text: str) -> None:
-        calls.append(path)
-        if path.parent.name == "workspaces":
-            raise PermissionError("host-detail-secret")
-        real_atomic_write(path, text)
+    saved = store.save(with_messages(second, "second"))
 
-    monkeypatch.setattr(session_store, "_atomic_write_text", fail_index)
-
-    error = assert_error("SESSION_SAVE_FAILED", lambda: store.save(with_messages(second, "second")))
-
-    assert [path.parent.name for path in calls] == ["sessions", "workspaces"]
-    assert error.message == "session was saved but workspace index was not updated"
-    assert index_path.read_bytes() == old_index
+    assert saved.session_id == "222222222222"
     persisted = deserialize_session((root / "sessions" / "222222222222.json").read_text(encoding="utf-8"))
     assert persisted.messages == (Message(Role.USER, "second"),)
+    assert SessionIndex(root, workspace.resolve()).stale_path.exists()

@@ -90,6 +90,11 @@ def test_recall_searches_protocol_and_metadata_with_workspace_isolation(
     assert all(len(item.excerpt) <= 500 for item in results)
     assert all(item.timestamp.tzinfo is not None for item in results)
 
+    natural = service.search(
+        workspace, "上次 Unicode parser 最后失败的是哪个测试？"
+    )
+    assert any("test_parser_unicode failed" in item.excerpt for item in natural)
+
 
 def test_missing_and_corrupt_fts_index_rebuilds_from_canonical_sessions(
     tmp_path: Path,

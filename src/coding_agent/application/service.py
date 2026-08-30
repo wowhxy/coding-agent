@@ -395,8 +395,14 @@ class CodingAgentService:
             )
         return tuple(items)
 
-    def list_sessions(self) -> tuple[SessionView, ...]:
-        summaries = list(self.store.list_sessions(self.config.workspace))
+    def list_sessions(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> tuple[SessionView, ...]:
+        summaries = list(
+            self.store.list_sessions(
+                self.config.workspace, limit=limit, offset=offset
+            )
+        )
         current = self._interactive.record
         if all(item.session_id != current.session_id for item in summaries):
             summaries.insert(
@@ -405,6 +411,7 @@ class CodingAgentService:
                     current.session_id, current.name, current.updated_at, False
                 ),
             )
+            summaries = summaries[:limit]
         return tuple(self._session_view(item) for item in summaries)
 
     def search_sessions(self, query: str) -> tuple[SessionView, ...]:

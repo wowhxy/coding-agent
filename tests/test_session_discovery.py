@@ -49,15 +49,20 @@ def test_list_sessions_is_newest_first_and_marks_latest(tmp_path: Path) -> None:
     assert [item.is_latest for item in summaries] == [True, False]
 
 
-def test_search_sessions_casefolds_unicode_name_and_complete_protocol_text(tmp_path: Path) -> None:
+def test_search_sessions_casefolds_unicode_name_and_bounded_tool_projection(tmp_path: Path) -> None:
     store, workspace = _store(tmp_path)
-    call = ToolCall("call-1", "read_file", '{"path":"STRASSE.py"}')
+    call = ToolCall("call-1", "execute_command", '{"command":"python STRASSE.py"}')
     record = replace(
         store.create_session(workspace, "p", "m"),
         messages=(
             Message(Role.USER, "检查文件"),
             Message(Role.ASSISTANT, tool_calls=(call,)),
-            Message(Role.TOOL, "修复完成", tool_call_id="call-1"),
+            Message(
+                Role.TOOL,
+                '{"ok":false,"output":"修复完成","error_code":"COMMAND_FAILED",'
+                '"error_message":"exit 1"}',
+                tool_call_id="call-1",
+            ),
         ),
     )
     saved = store.rename_session(record, "Straße 修复")
@@ -68,16 +73,18 @@ def test_search_sessions_casefolds_unicode_name_and_complete_protocol_text(tmp_p
     assert store.search_sessions(workspace, "absent") == ()
 
 
-def test_list_does_not_hide_corrupt_indexed_session(tmp_path: Path) -> None:
+def test_catalog_list_does_not_open_corrupt_canonical_session(tmp_path: Path) -> None:
     store, workspace = _store(tmp_path)
     saved = store.save(
         replace(store.create_session(workspace, "p", "m"), messages=(Message(Role.USER, "task"),))
     )
     (store.root / "sessions" / f"{saved.session_id}.json").write_text("{", encoding="utf-8")
 
+    summaries = store.list_sessions(workspace)
+    assert [item.session_id for item in summaries] == [saved.session_id]
+    assert store.last_report.full_history_files_loaded == 0
     with pytest.raises(SessionError) as raised:
-        store.list_sessions(workspace)
-
+        store.load_session(saved.session_id, workspace)
     assert raised.value.error_code == "SESSION_CORRUPT"
 
 
