@@ -50,7 +50,9 @@ readiness without contacting the provider or printing the key.
 | `Ctrl+Enter` | Submit |
 | `Enter` | Insert newline |
 | `Ctrl+C` | Request cooperative cancellation, or clear idle input |
-| `Esc` | Close a dialog or focus the editor |
+| `Esc` | Close a dialog/Session menu or focus the editor |
+| `F2` | Rename the highlighted Session (Sessions list focused) |
+| `Delete` | Confirm deletion of the highlighted Session (Sessions list focused) |
 | `Ctrl+N` | Create a session |
 | `Ctrl+B` | Toggle session sidebar |
 | `Ctrl+L` | Show/hide Activity |
@@ -85,6 +87,13 @@ Skills, Plugins, Memory, Recall, Activity, pane-resizing, and Help actions.
 manual/automatic/inactive status and can be activated or deactivated. Plugins
 show version, status, and description and can be enabled or disabled. Plugin
 activity immediately carries `[plugin:<name>]`; no tool-name guessing is used.
+
+Session names are the primary sidebar label; the short ID and working/completed/
+error state are secondary. Right-click a Session for Rename, Delete, and New
+Session. Rename accepts Unicode names and preserves conversation position.
+Delete always confirms which Session is targeted; deleting conversation history
+does not delete workspace memory. A running Session must be cancelled before it
+can be deleted. The `+ New` button, `Ctrl+N`, and `/new` share the same action.
 
 Session deletion, Memory clear, and quitting during execution require explicit
 confirmation. Executable plugins run as trusted local code and are not an OS

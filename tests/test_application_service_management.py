@@ -4,10 +4,13 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
+
 from coding_agent.application.service import CodingAgentService
 from coding_agent.application.state import AgentState
 from coding_agent.config import RuntimeConfig
 from coding_agent.protocol import ModelTurn, ToolCall
+from coding_agent.session import SessionError
 from coding_agent.session_store import JsonSessionStore
 from tests.fakes import FakeModelClient
 
@@ -77,6 +80,76 @@ def test_session_navigation_rename_delete_and_resume_are_transactional(tmp_path:
     assert resumed.snapshot().conversation[-1].content == "second done"
     active = next(item for item in resumed.snapshot().sessions if item.active)
     assert active.display_name == "second"
+    resumed.close()
+
+
+def test_session_management_can_target_a_non_active_session(tmp_path: Path) -> None:
+    service, _workspace, _home = _create(
+        tmp_path,
+        [ModelTurn("first done"), ModelTurn("second done")],
+    )
+    first_id = service.snapshot().status.session_id
+    service.submit_task("first")
+    second = service.new_session()
+    service.submit_task("second")
+
+    renamed = service.rename_session("  解析器修复  ", first_id)
+
+    assert renamed.session_id == first_id
+    assert renamed.display_name == "解析器修复"
+    assert service.snapshot().status.session_id == second.session_id
+    assert service.snapshot().conversation[-1].content == "second done"
+
+    still_active = service.delete_session(first_id)
+
+    assert still_active.session_id == second.session_id
+    assert service.snapshot().status.session_id == second.session_id
+    assert {item.session_id for item in service.list_sessions()} == {
+        second.session_id
+    }
+    service.close()
+
+
+def test_deleting_running_session_is_rejected_without_deleting_it(
+    tmp_path: Path,
+) -> None:
+    service, _workspace, _home = _create(tmp_path, [ModelTurn("done")])
+    session_id = service.snapshot().status.session_id
+    service._running = True
+
+    with pytest.raises(SessionError) as raised:
+        service.delete_session(session_id)
+
+    assert raised.value.error_code == "SESSION_BUSY"
+    assert "running" in raised.value.message
+    assert service.snapshot().status.session_id == session_id
+    assert service.list_sessions()[0].session_id == session_id
+    service._running = False
+    service.close()
+
+
+def test_renaming_non_active_session_preserves_restart_resume_target(
+    tmp_path: Path,
+) -> None:
+    service, workspace, home = _create(tmp_path, [])
+    first_id = service.snapshot().status.session_id
+    service.rename_session("Session A")
+    second_id = service.new_session().session_id
+    service.rename_session("Session B")
+
+    service.rename_session("Renamed A", first_id)
+    service.close()
+
+    resumed = CodingAgentService.create(
+        _config(workspace),
+        "custom",
+        home,
+        lambda *_args: FakeModelClient([]),
+    )
+    assert resumed.snapshot().status.session_id == second_id
+    assert next(
+        item for item in resumed.list_sessions() if item.session_id == first_id
+    ).display_name == "Renamed A"
     resumed.close()
 
 

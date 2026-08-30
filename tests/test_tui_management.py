@@ -7,7 +7,12 @@ from textual.widgets import Button, Markdown, Static
 
 from coding_agent.application.state import MemoryCandidateView
 from coding_agent.tui.app import CodingAgentApp
-from coding_agent.tui.screens import ConfirmScreen, HelpScreen, ManagementScreen
+from coding_agent.tui.screens import (
+    ConfirmScreen,
+    DeleteSessionScreen,
+    HelpScreen,
+    ManagementScreen,
+)
 from coding_agent.tui.screens import (
     CommandPaletteScreen,
     PluginManagementScreen,
@@ -54,12 +59,12 @@ def test_destructive_session_and_memory_clear_require_confirmation(tmp_path: Pat
         app = CodingAgentApp(service)
         async with app.run_test() as pilot:
             await _command(app, pilot, "/delete")
-            assert isinstance(app.screen, ConfirmScreen)
+            assert isinstance(app.screen, DeleteSessionScreen)
             await pilot.press("escape")
             assert service.delete_count == 0
-            assert not isinstance(app.screen, ConfirmScreen)
+            assert not isinstance(app.screen, DeleteSessionScreen)
             await _command(app, pilot, "/delete")
-            await pilot.click("#confirm")
+            await pilot.click("#delete-session-confirm")
             assert service.delete_count == 1
             await _command(app, pilot, "/memory clear")
             await pilot.click("#confirm")
@@ -88,6 +93,26 @@ def test_rename_help_and_candidate_confirmation_are_direct(tmp_path: Path) -> No
             assert isinstance(app.screen, ConfirmScreen)
             await pilot.click("#confirm")
             assert service.candidate_decisions == [("candidate-1", True)]
+
+    asyncio.run(scenario())
+
+
+def test_session_slash_new_rename_and_delete_remain_compatible(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service = FakeProductService(tmp_path)
+        app = CodingAgentApp(service)
+        async with app.run_test(size=(120, 36)) as pilot:
+            await _command(app, pilot, "/rename slash-name")
+            assert service.snapshot().sessions[0].display_name == "slash-name"
+
+            await _command(app, pilot, "/new")
+            created_id = service.snapshot().status.session_id
+            assert service.new_count == 1
+
+            await _command(app, pilot, "/delete")
+            assert isinstance(app.screen, DeleteSessionScreen)
+            await pilot.click("#delete-session-confirm")
+            assert service.delete_targets[-1] == created_id
 
     asyncio.run(scenario())
 

@@ -431,30 +431,54 @@ class CodingAgentService:
         self._emit(ProductEventKind.SESSION_CHANGED, "Session switched")
         return self._session_view_record(record)
 
-    def rename_session(self, name: str) -> SessionView:
+    def rename_session(
+        self, name: str, session_id: str | None = None
+    ) -> SessionView:
         with self._lock:
             self._require_open()
-        record = self._interactive.rename(name)
+            current = self._interactive.record
+        target_id = current.session_id if session_id is None else session_id.strip()
+        if target_id == current.session_id:
+            record = self._interactive.rename(name)
+        else:
+            record = self.store.load_session(target_id, current.workspace)
+            record = self.store.rename_session(record, name, make_latest=False)
         self._emit(ProductEventKind.SESSION_CHANGED, "Session renamed")
         return self._session_view_record(record)
 
-    def delete_session(self) -> SessionView:
-        self._require_idle()
-        current = self._interactive.record
+    def delete_session(self, session_id: str | None = None) -> SessionView:
+        with self._lock:
+            self._require_open()
+            current = self._interactive.record
+            target_id = current.session_id if session_id is None else session_id.strip()
+            if self._running and target_id == current.session_id:
+                raise SessionError(
+                    "SESSION_BUSY",
+                    "cannot delete a running session; cancel the task first",
+                )
         try:
-            selected = self.store.delete_session(current.session_id, current.workspace)
+            selected = self.store.delete_session(target_id, current.workspace)
         except SessionError as exc:
-            if exc.error_code != "SESSION_NOT_FOUND" or current.messages:
+            if (
+                target_id != current.session_id
+                or exc.error_code != "SESSION_NOT_FOUND"
+                or current.messages
+            ):
                 raise
             selected = self.store.load_latest(current.workspace)
-        if selected is None:
-            selected = self.store.create_session(
-                current.workspace, self.provider_name, self.config.model
-            )
-        self.manual_skills.remove_session(current.session_id)
-        self._activate_session(selected)
+        self.manual_skills.remove_session(target_id)
+        self._session_results.pop(target_id, None)
+        if target_id == current.session_id:
+            if selected is None:
+                selected = self.store.create_session(
+                    current.workspace, self.provider_name, self.config.model
+                )
+            self._activate_session(selected)
+            result = self._session_view_record(selected)
+        else:
+            result = self._session_view_record(current)
         self._emit(ProductEventKind.SESSION_CHANGED, "Session deleted")
-        return self._session_view_record(selected)
+        return result
 
     def list_memory(self) -> tuple[MemoryView, ...]:
         return tuple(_memory_view(item) for item in self.memory_store.list(self.config.workspace))

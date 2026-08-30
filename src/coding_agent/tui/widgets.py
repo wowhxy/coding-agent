@@ -8,8 +8,10 @@ from dataclasses import dataclass
 
 from textual import events, on
 from textual.app import ComposeResult
-from textual.containers import Vertical
-from textual.widgets import Input, Markdown, OptionList, Static, TextArea
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.message import Message
+from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from ..application.events import (
@@ -101,6 +103,126 @@ class SlashCommandSuggestions(OptionList):
         self.display = False
 
 
+class SessionContextRequested(Message):
+    """A native right-click selected a specific Session item."""
+
+    def __init__(self, session_id: str, screen_x: int, screen_y: int) -> None:
+        super().__init__()
+        self.session_id = session_id
+        self.screen_x = screen_x
+        self.screen_y = screen_y
+
+
+class SessionActionRequested(Message):
+    """A Session widget requested an app-level management action."""
+
+    def __init__(self, action: str, session_id: str | None) -> None:
+        super().__init__()
+        self.action = action
+        self.session_id = session_id
+
+
+class SessionOptionList(OptionList):
+    """Session list with target-aware mouse and keyboard management."""
+
+    BINDINGS = [
+        Binding("f2", "rename_selected", "Rename", show=False),
+        Binding("delete", "delete_selected", "Delete", show=False),
+    ]
+
+    async def _on_click(self, event: events.Click) -> None:
+        if event.button == 3:
+            clicked = event.style.meta.get("option")
+            if clicked is not None:
+                option = self.get_option_at_index(clicked)
+                if not option.disabled and option.id is not None:
+                    self.highlighted = clicked
+                    self.post_message(
+                        SessionContextRequested(
+                            option.id,
+                            event.screen_x if event.screen_x is not None else event.x,
+                            event.screen_y if event.screen_y is not None else event.y,
+                        )
+                    )
+                event.prevent_default()
+                event.stop()
+            return
+        await super()._on_click(event)
+
+    def action_rename_selected(self) -> None:
+        session_id = self._highlighted_session_id()
+        if session_id is not None:
+            self.post_message(SessionActionRequested("rename", session_id))
+
+    def action_delete_selected(self) -> None:
+        session_id = self._highlighted_session_id()
+        if session_id is not None:
+            self.post_message(SessionActionRequested("delete", session_id))
+
+    def _highlighted_session_id(self) -> str | None:
+        option = self.highlighted_option
+        return option.id if option is not None else None
+
+
+class SessionContextMenu(OptionList):
+    """Small non-modal menu positioned next to a right-clicked Session."""
+
+    BINDINGS = [Binding("escape", "dismiss_menu", "Close", show=False)]
+    MENU_WIDTH = 24
+    MENU_HEIGHT = 7
+
+    def __init__(self, *, id: str = "session-context-menu") -> None:
+        super().__init__(id=id, compact=True)
+        self.target_session_id: str | None = None
+
+    def open_for(
+        self,
+        session: SessionView,
+        *,
+        screen_x: int,
+        screen_y: int,
+        screen_width: int,
+        screen_height: int,
+    ) -> None:
+        self.target_session_id = session.session_id
+        self.set_options(
+            (
+                Option("Rename", id="rename"),
+                Option("Delete", id="delete", disabled=session.running),
+                Option("────────────────────", id="separator", disabled=True),
+                Option("New Session", id="new"),
+            )
+        )
+        self.highlighted = 0
+        x = min(max(0, screen_x), max(0, screen_width - self.MENU_WIDTH))
+        y = min(max(0, screen_y), max(0, screen_height - self.MENU_HEIGHT))
+        self.styles.offset = (x, y)
+        self.display = True
+        self.focus()
+
+    def close_menu(self) -> None:
+        self.display = False
+
+    @on(OptionList.OptionSelected)
+    def _action_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_id is None or event.option_id == "separator":
+            return
+        target = self.target_session_id
+        self.close_menu()
+        self.post_message(
+            SessionActionRequested(
+                "new" if event.option_id == "new" else event.option_id,
+                target,
+            )
+        )
+
+    def action_dismiss_menu(self) -> None:
+        self.close_menu()
+        handler = getattr(self.app, "restore_session_list_focus", None)
+        if callable(handler):
+            handler()
+
+
 class SessionSidebar(Vertical):
     """Filterable human-first session navigation."""
 
@@ -109,10 +231,16 @@ class SessionSidebar(Vertical):
         self._sessions: tuple[SessionView, ...] = ()
 
     def compose(self) -> ComposeResult:
-        yield Static("Sessions", classes="panel-title")
+        with Horizontal(id="sessions-header"):
+            yield Static("Sessions", classes="panel-title")
+            yield Button("+ New", id="new-session", compact=True)
         yield Input(placeholder="Filter sessions", id="session-filter")
-        yield OptionList(id="session-list", compact=True)
-        yield Static("Ctrl+N new  /rename  /delete", classes="sidebar-help")
+        yield SessionOptionList(id="session-list", compact=True)
+        yield Static("F2 rename  Del delete  Ctrl+N new", classes="sidebar-help")
+
+    @on(Button.Pressed, "#new-session")
+    def _new_session(self, _event: Button.Pressed) -> None:
+        self.post_message(SessionActionRequested("new", None))
 
     def update_sessions(self, sessions: Iterable[SessionView]) -> None:
         self._sessions = tuple(sessions)
@@ -146,7 +274,7 @@ class SessionSidebar(Vertical):
             )
             for item in visible
         ]
-        option_list = self.query_one("#session-list", OptionList)
+        option_list = self.query_one("#session-list", SessionOptionList)
         option_list.set_options(options)
         active_index = next(
             (index for index, item in enumerate(visible) if item.active), None

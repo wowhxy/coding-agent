@@ -26,7 +26,13 @@ class SessionStore(Protocol):
     def save(self, record: SessionRecord) -> SessionRecord:
         """Persist a record and return its current metadata."""
 
-    def rename_session(self, record: SessionRecord, name: str) -> SessionRecord:
+    def rename_session(
+        self,
+        record: SessionRecord,
+        name: str,
+        *,
+        make_latest: bool = True,
+    ) -> SessionRecord:
         """Persist a user-supplied display name."""
 
 

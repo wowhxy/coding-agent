@@ -12,10 +12,14 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+import pytest
+from textual.widgets import Input, OptionList
+
 from coding_agent.application.service import CodingAgentService
 from coding_agent.config import RuntimeConfig
 from coding_agent.model import ModelTransportError
 from coding_agent.protocol import Message, ModelTurn, RunStatus, ToolCall, ToolDefinition
+from coding_agent.session import SessionError
 from coding_agent.tui.app import CodingAgentApp
 from coding_agent.tui.screens import (
     ConfirmScreen,
@@ -131,6 +135,21 @@ def _install_tui_resources(workspace: Path, home: Path) -> None:
         encoding="utf-8",
     )
     shutil.copytree(PLUGIN_EXAMPLE, home / "plugins" / "git-readonly")
+
+
+def _session_option_index(app: CodingAgentApp, session_id: str) -> int:
+    options = app.query_one("#session-list", OptionList)
+    return next(
+        index
+        for index in range(options.option_count)
+        if options.get_option_at_index(index).id == session_id
+    )
+
+
+async def _right_click_session(app: CodingAgentApp, pilot, session_id: str) -> None:
+    index = _session_option_index(app, session_id)
+    await pilot.click("#session-list", offset=(2, index * 2 + 1), button=3)
+    await pilot.pause()
 
 
 def test_real_product_repairs_with_tools_three_subagents_and_resumes(tmp_path: Path) -> None:
@@ -274,6 +293,87 @@ def test_real_product_repairs_with_tools_three_subagents_and_resumes(tmp_path: P
             app.exit()
 
     asyncio.run(second_launch())
+
+
+def test_real_session_context_menu_rename_delete_new_and_agent_turn(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    client = FakeModelClient([ModelTurn("Session UX agent response.")])
+    service = CodingAgentService.create(
+        _config(workspace), "custom", home, ClientFactory(client)
+    )
+    session_a = service.snapshot().status.session_id
+    service.rename_session("Session A")
+    session_b = service.new_session().session_id
+    service.rename_session("Session B")
+    service.add_memory("build.system = cmake")
+
+    async def scenario() -> None:
+        app = CodingAgentApp(service)
+        async with app.run_test(size=(120, 36)) as pilot:
+            assert {item.session_id for item in service.list_sessions()} == {
+                session_a,
+                session_b,
+            }
+
+            await _right_click_session(app, pilot, session_b)
+            menu = app.query_one("#session-context-menu", OptionList)
+            menu.highlighted = 0
+            await pilot.press("enter")
+            rename_input = app.screen.query_one("#rename-session-value", Input)
+            rename_input.value = "parser-fix"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert service.store.load_session(session_b, workspace).name == "parser-fix"
+            assert "parser-fix" in "\n".join(
+                str(app.query_one("#session-list", OptionList).get_option_at_index(i).prompt)
+                for i in range(2)
+            )
+
+            session_a_index = _session_option_index(app, session_a)
+            await pilot.click(
+                "#session-list", offset=(2, session_a_index * 2 + 1)
+            )
+            await pilot.pause()
+            assert service.snapshot().status.session_id == session_a
+
+            await _right_click_session(app, pilot, session_b)
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.press("escape")
+            assert service.store.load_session(session_b, workspace).name == "parser-fix"
+
+            await _right_click_session(app, pilot, session_b)
+            menu.highlighted = 1
+            await pilot.press("enter")
+            await pilot.click("#delete-session-confirm")
+            await pilot.pause()
+            with pytest.raises(SessionError) as deleted:
+                service.store.load_session(session_b, workspace)
+            assert deleted.value.error_code == "SESSION_NOT_FOUND"
+            assert service.snapshot().status.session_id == session_a
+
+            await pilot.press("ctrl+n")
+            created = service.snapshot().status.session_id
+            assert created not in {session_a, session_b}
+            composer = app.query_one("#composer", Composer)
+            assert app.focused is composer
+            assert service.snapshot().conversation == ()
+            assert service.snapshot().status.memory_count == 1
+
+            composer.text = "Confirm the coding agent still responds."
+            await pilot.press("ctrl+enter")
+            await _wait_until_idle(app, pilot)
+            assert "Session UX agent response" in app.query_one(
+                "#conversation", ConversationPane
+            ).plain_text
+            assert service.snapshot().status.memory_count == 1
+            app.exit()
+
+    asyncio.run(scenario())
 
 
 def test_real_product_recovers_after_provider_failure(tmp_path: Path) -> None:

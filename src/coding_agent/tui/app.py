@@ -35,9 +35,11 @@ from ..tools.registry import ToolArgumentError
 from .screens import (
     CommandPaletteScreen,
     ConfirmScreen,
+    DeleteSessionScreen,
     HelpScreen,
     ManagementScreen,
     PluginManagementScreen,
+    RenameSessionScreen,
     SkillManagementScreen,
     TextPromptScreen,
 )
@@ -58,6 +60,9 @@ from .widgets import (
     Composer,
     ConversationPane,
     ProductStatusBar,
+    SessionActionRequested,
+    SessionContextMenu,
+    SessionContextRequested,
     SessionSidebar,
     SlashCommandSuggestions,
 )
@@ -126,6 +131,7 @@ class CodingAgentApp(App[None]):
             yield ActivityPane()
         yield ProductStatusBar(id="status-bar")
         yield Footer()
+        yield SessionContextMenu()
 
     def on_mount(self) -> None:
         self._unsubscribe = self.service.subscribe(
@@ -214,6 +220,11 @@ class CodingAgentApp(App[None]):
         composer.focus()
 
     def action_focus_input(self) -> None:
+        menu = self.query_one("#session-context-menu", SessionContextMenu)
+        if menu.display:
+            menu.close_menu()
+            self.restore_session_list_focus()
+            return
         self.query_one(
             "#slash-suggestions", SlashCommandSuggestions
         ).dismiss_suggestions()
@@ -338,6 +349,40 @@ class CodingAgentApp(App[None]):
         self._refresh_all(self.service.snapshot())
         self.query_one("#composer", Composer).focus()
 
+    @on(SessionContextRequested)
+    def _session_context_requested(self, message: SessionContextRequested) -> None:
+        session = self._find_session(message.session_id)
+        if session is None:
+            return
+        self.query_one("#session-context-menu", SessionContextMenu).open_for(
+            session,
+            screen_x=message.screen_x,
+            screen_y=message.screen_y,
+            screen_width=self.size.width,
+            screen_height=self.size.height,
+        )
+
+    @on(SessionActionRequested)
+    def _session_action_requested(self, message: SessionActionRequested) -> None:
+        if message.action == "new":
+            self.action_new_session()
+        elif message.action == "rename" and message.session_id is not None:
+            self._request_session_rename(message.session_id)
+        elif message.action == "delete" and message.session_id is not None:
+            self._request_session_delete(message.session_id)
+
+    def on_click(self, event: events.Click) -> None:
+        menu = self.query_one("#session-context-menu", SessionContextMenu)
+        if not menu.display:
+            return
+        widget = event.widget
+        if widget is menu or (widget is not None and menu in widget.ancestors):
+            return
+        menu.close_menu()
+
+    def restore_session_list_focus(self) -> None:
+        self.query_one("#session-list").focus()
+
     def apply_product_event(self, event: ProductEvent) -> None:
         pane = self.query_one("#conversation", ConversationPane)
         pane.apply_event(event)
@@ -376,8 +421,7 @@ class CodingAgentApp(App[None]):
 
     def _execute_command(self, command) -> None:
         refresh_conversation = not (
-            self._running_task
-            and command.name is CommandName.SESSION
+            command.name is CommandName.SESSION
             and command.action is CommandAction.RENAME
         )
         try:
@@ -417,10 +461,7 @@ class CodingAgentApp(App[None]):
         elif command.action is CommandAction.RENAME:
             self.service.rename_session(command.argument)
         elif command.action is CommandAction.DELETE:
-            self.push_screen(
-                ConfirmScreen("Delete the active session?"),
-                self._delete_session_confirmed,
-            )
+            self._request_session_delete(self.service.snapshot().status.session_id)
 
     def _execute_memory_command(self, command) -> None:
         if command.action is CommandAction.LIST:
@@ -527,10 +568,69 @@ class CodingAgentApp(App[None]):
         self.apply_product_event(event)
         self.notify(event.title, severity="error")
 
-    def _delete_session_confirmed(self, confirmed: bool) -> None:
-        if confirmed:
-            self.service.delete_session()
-            self._refresh_all(self.service.snapshot())
+    def _request_session_rename(self, session_id: str) -> None:
+        session = self._find_session(session_id)
+        if session is None:
+            return
+        self.push_screen(
+            RenameSessionScreen(session.display_name),
+            lambda name: self._session_rename_finished(session_id, name),
+        )
+
+    def _session_rename_finished(self, session_id: str, name: str | None) -> None:
+        if name is not None:
+            try:
+                self.service.rename_session(name, session_id)
+                self._refresh_session_chrome(self.service.snapshot())
+                self.notify("Session renamed")
+            except Exception as exc:
+                self._show_product_error(exc)
+        self.restore_session_list_focus()
+
+    def _request_session_delete(self, session_id: str) -> None:
+        session = self._find_session(session_id)
+        if session is None:
+            return
+        if session.running:
+            self.notify(
+                "Cannot delete a running session. Cancel the task first.",
+                severity="warning",
+            )
+            return
+        self.push_screen(
+            DeleteSessionScreen(session.display_name),
+            lambda confirmed: self._session_delete_finished(session_id, confirmed),
+        )
+
+    def _session_delete_finished(self, session_id: str, confirmed: bool) -> None:
+        if not confirmed:
+            self.restore_session_list_focus()
+            return
+        was_active = self.service.snapshot().status.session_id == session_id
+        try:
+            self.service.delete_session(session_id)
+            snapshot = self.service.snapshot()
+            if was_active:
+                self._refresh_all(snapshot)
+            else:
+                self._refresh_session_chrome(snapshot)
+            self.notify("Session deleted")
+        except Exception as exc:
+            self._show_product_error(exc)
+        if was_active:
+            self.query_one("#composer", Composer).focus()
+        else:
+            self.restore_session_list_focus()
+
+    def _find_session(self, session_id: str):
+        return next(
+            (
+                item
+                for item in self.service.snapshot().sessions
+                if item.session_id == session_id
+            ),
+            None,
+        )
 
     def _clear_memory_confirmed(self, confirmed: bool) -> None:
         if confirmed:
@@ -636,7 +736,9 @@ def _help_markdown() -> str:
         "# Coding Agent Help\n\n"
         "## Keys\n\n"
         "- `Ctrl+Enter` submit\n- `Enter` newline\n- `Ctrl+C` cancel/clear\n"
-        "- `Esc` focus input\n- `Ctrl+N` new session\n- `Ctrl+B` sessions\n"
+        "- `Esc` focus input / close Session menu\n"
+        "- `F2` rename selected Session\n- `Delete` delete selected Session\n"
+        "- `Ctrl+N` new session\n- `Ctrl+B` sessions\n"
         "- `Ctrl+L` toggle Activity\n- `Ctrl+P` command palette\n"
         "- `Alt+Left/Right` resize Sessions\n"
         "- `Alt+Shift+Left/Right` resize Activity\n"

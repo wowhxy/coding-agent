@@ -161,7 +161,9 @@ class JsonSessionStore:
         with self._lock:
             return self._save(record)
 
-    def _save(self, record: SessionRecord) -> SessionRecord:
+    def _save(
+        self, record: SessionRecord, *, make_latest: bool = True
+    ) -> SessionRecord:
         if not isinstance(record, SessionRecord):
             raise SessionError("SESSION_SAVE_FAILED", "session could not be saved")
         canonical = _canonical_workspace(record.workspace)
@@ -175,9 +177,15 @@ class JsonSessionStore:
 
         current = self._read_index(canonical, missing_ok=True)
         session_ids = [] if current is None else list(current["session_ids"])
+        previous_latest = None if current is None else current["latest_session_id"]
         session_ids = [item for item in session_ids if item != persisted.session_id]
         session_ids.append(persisted.session_id)
-        index_text = _serialize_index(canonical, persisted.session_id, session_ids)
+        latest = (
+            persisted.session_id
+            if make_latest or previous_latest is None
+            else previous_latest
+        )
+        index_text = _serialize_index(canonical, latest, session_ids)
         try:
             _atomic_write_text(self._session_path(persisted.session_id), session_text)
         except (OSError, ValueError):
@@ -191,7 +199,13 @@ class JsonSessionStore:
             ) from None
         return persisted
 
-    def rename_session(self, record: SessionRecord, name: str) -> SessionRecord:
+    def rename_session(
+        self,
+        record: SessionRecord,
+        name: str,
+        *,
+        make_latest: bool = True,
+    ) -> SessionRecord:
         """Persist a trimmed display name for a session."""
 
         if type(name) is not str:
@@ -207,7 +221,8 @@ class JsonSessionStore:
                     record,
                     name=normalized,
                     name_source=SessionNameSource.MANUAL,
-                )
+                ),
+                make_latest=make_latest,
             )
 
     def delete_session(self, session_id: str, workspace: Path) -> SessionRecord | None:

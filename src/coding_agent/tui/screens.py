@@ -63,6 +63,88 @@ class TextPromptScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class RenameSessionScreen(ModalScreen[str | None]):
+    """Validated Session rename dialog; persistence stays in the service."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, current_name: str) -> None:
+        super().__init__()
+        self.current_name = current_name
+
+    def compose(self) -> ComposeResult:
+        with Grid(id="rename-session-dialog"):
+            yield Label("Rename Session", classes="dialog-title")
+            yield Label(f"Current: {self.current_name}", id="rename-session-current")
+            yield Input(
+                value=self.current_name,
+                max_length=80,
+                id="rename-session-value",
+            )
+            yield Static("", id="rename-session-error")
+            yield Button("Rename", id="rename-session-confirm", variant="primary")
+            yield Button("Cancel", id="rename-session-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#rename-session-error", Static).display = False
+        self.query_one("#rename-session-value", Input).focus()
+
+    @on(Input.Submitted, "#rename-session-value")
+    def _input_submitted(self, _event: Input.Submitted) -> None:
+        self._submit()
+
+    @on(Button.Pressed)
+    def _button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "rename-session-confirm":
+            self._submit()
+        else:
+            self.dismiss(None)
+
+    def _submit(self) -> None:
+        value = self.query_one("#rename-session-value", Input).value.strip()
+        if not value:
+            error = self.query_one("#rename-session-error", Static)
+            error.update("Session name cannot be empty.")
+            error.display = True
+            self.query_one("#rename-session-value", Input).focus()
+            return
+        self.dismiss(value)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class DeleteSessionScreen(ModalScreen[bool]):
+    """Session-specific destructive confirmation with accurate scope."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, session_name: str) -> None:
+        super().__init__()
+        self.session_name = session_name
+
+    def compose(self) -> ComposeResult:
+        with Grid(id="delete-session-dialog"):
+            yield Label("Delete Session?", classes="dialog-title")
+            yield Static(
+                f"{self.session_name}\n\n"
+                "This will delete this session's persisted conversation history.\n"
+                "Workspace memory will not be deleted.",
+                id="delete-session-message",
+            )
+            yield Button(
+                "Delete", id="delete-session-confirm", variant="error"
+            )
+            yield Button("Cancel", id="delete-session-cancel", variant="primary")
+
+    @on(Button.Pressed)
+    def _button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "delete-session-confirm")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 class HelpScreen(ModalScreen[None]):
     BINDINGS = [("escape", "close", "Close")]
 

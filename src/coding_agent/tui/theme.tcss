@@ -1,5 +1,6 @@
 Screen {
     layout: vertical;
+    layers: base overlay;
     background: #0b1020;
     color: #d8dee9;
 }
@@ -25,6 +26,22 @@ Screen {
     padding: 0 1;
 }
 
+#sessions-header {
+    height: 3;
+    align-vertical: middle;
+}
+
+#sessions-header .panel-title {
+    width: 1fr;
+    height: 3;
+}
+
+#new-session {
+    width: 8;
+    min-width: 8;
+    height: 3;
+}
+
 .panel-title {
     height: 2;
     padding-top: 1;
@@ -39,6 +56,17 @@ Screen {
 
 #session-list {
     height: 1fr;
+}
+
+#session-context-menu {
+    display: none;
+    position: absolute;
+    layer: overlay;
+    width: 24;
+    height: 7;
+    border: solid #88c0d0;
+    background: #111827;
+    padding: 0 1;
 }
 
 .sidebar-help {
@@ -133,7 +161,8 @@ Footer {
 }
 
 ConfirmScreen, TextPromptScreen, HelpScreen, ManagementScreen,
-CommandPaletteScreen, SkillManagementScreen, PluginManagementScreen {
+CommandPaletteScreen, SkillManagementScreen, PluginManagementScreen,
+RenameSessionScreen, DeleteSessionScreen {
     align: center middle;
 }
 
@@ -146,6 +175,35 @@ CommandPaletteScreen, SkillManagementScreen, PluginManagementScreen {
     height: 11;
     border: thick #334155;
     background: #111827;
+}
+
+#rename-session-dialog, #delete-session-dialog {
+    grid-size: 2;
+    grid-gutter: 1 2;
+    padding: 1 2;
+    width: 60;
+    max-width: 95%;
+    height: 15;
+    border: thick #334155;
+    background: #111827;
+}
+
+#rename-session-dialog .dialog-title,
+#rename-session-current,
+#rename-session-value,
+#rename-session-error,
+#delete-session-dialog .dialog-title,
+#delete-session-message {
+    column-span: 2;
+}
+
+#rename-session-error {
+    height: 1;
+    color: #f87171;
+}
+
+#delete-session-message {
+    height: 6;
 }
 
 #confirm-question, #prompt-dialog > Label {

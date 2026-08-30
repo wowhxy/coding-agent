@@ -43,7 +43,11 @@ class FakeProductService:
         self.new_count = 0
         self.switches: list[str] = []
         self.renames: list[str] = []
+        self.rename_targets: list[tuple[str, str]] = []
+        self.rename_error: Exception | None = None
         self.delete_count = 0
+        self.delete_targets: list[str] = []
+        self.delete_error: Exception | None = None
         self.memory_actions: list[tuple[str, str]] = []
         self.skill_actions: list[tuple[str, str]] = []
         self.plugin_actions: list[tuple[str, str]] = []
@@ -152,7 +156,7 @@ class FakeProductService:
 
     def new_session(self) -> SessionView:
         self.new_count += 1
-        identifier = "333333333333"
+        identifier = str(self.new_count + 2) * 12
         created = SessionView(identifier, None, NOW, True, False, None)
         self._sessions += (created,)
         self._session_id = identifier
@@ -164,19 +168,38 @@ class FakeProductService:
         self._session_id = session_id
         return next(item for item in self._sessions if item.session_id == session_id)
 
-    def rename_session(self, name: str) -> SessionView:
+    def rename_session(
+        self, name: str, session_id: str | None = None
+    ) -> SessionView:
+        if self.rename_error is not None:
+            raise self.rename_error
+        target_id = self._session_id if session_id is None else session_id
+        normalized = name.strip()
         self.renames.append(name)
+        self.rename_targets.append((target_id, normalized))
         self._sessions = tuple(
-            replace(item, name=name) if item.session_id == self._session_id else item
+            replace(item, name=normalized) if item.session_id == target_id else item
             for item in self._sessions
         )
-        return next(item for item in self._sessions if item.session_id == self._session_id)
+        return next(item for item in self._sessions if item.session_id == target_id)
 
-    def delete_session(self) -> SessionView:
+    def delete_session(self, session_id: str | None = None) -> SessionView:
+        if self.delete_error is not None:
+            raise self.delete_error
+        target_id = self._session_id if session_id is None else session_id
         self.delete_count += 1
-        self._sessions = tuple(item for item in self._sessions if item.session_id != self._session_id)
-        self._session_id = self._sessions[0].session_id
-        return self._sessions[0]
+        self.delete_targets.append(target_id)
+        was_active = target_id == self._session_id
+        self._sessions = tuple(
+            item for item in self._sessions if item.session_id != target_id
+        )
+        if was_active:
+            if not self._sessions:
+                return self.new_session()
+            self._session_id = self._sessions[0].session_id
+        return next(
+            item for item in self.snapshot().sessions if item.session_id == self._session_id
+        )
 
     def search_sessions(self, query: str) -> tuple[SessionView, ...]:
         needle = query.casefold()
