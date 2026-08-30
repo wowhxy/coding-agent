@@ -275,6 +275,55 @@ def test_help_describes_optional_interactive_task_and_session_flags(
     assert "interactive" in normalized_help.lower()
     assert "--new-session" in normalized_help
     assert "--resume-session SESSION_ID" in normalized_help
+    assert "coding-agent tui" in normalized_help
+    assert "coding-agent doctor" in normalized_help
+
+
+def test_doctor_route_never_constructs_provider_and_never_prints_secret(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    calls = []
+
+    exit_code = main(
+        ["doctor", "--workspace", str(workspace), "--provider", "deepseek"],
+        environ={
+            "DEEPSEEK_API_KEY": FAKE_API_KEY,
+            "CODING_AGENT_HOME": str(tmp_path / "home"),
+        },
+        client_factory=lambda *_args: calls.append(_args),  # type: ignore[arg-type]
+    )
+
+    output = capsys.readouterr()
+    assert exit_code == 0
+    assert calls == []
+    assert "Ready" in output.out
+    assert FAKE_API_KEY not in output.out + output.err
+
+
+def test_tui_route_resolves_existing_config_and_uses_injected_launcher(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    launched = []
+
+    def launch(config, provider_name, runtime_environment, client_factory, new_session, resume_session):
+        launched.append((config, provider_name, runtime_environment, client_factory, new_session, resume_session))
+        return 17
+
+    exit_code = main(
+        ["tui", "--workspace", str(workspace), "--provider", "deepseek"],
+        environ={"DEEPSEEK_API_KEY": FAKE_API_KEY},
+        tui_launcher=launch,
+    )
+
+    assert exit_code == 17
+    assert len(launched) == 1
+    assert launched[0][0].workspace == workspace.resolve()
+    assert launched[0][1] == "deepseek"
+    assert launched[0][4:] == (False, None)
 
 
 def test_session_selection_flags_are_mutually_exclusive(

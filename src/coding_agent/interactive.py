@@ -84,13 +84,22 @@ class InteractiveSession:
                 )
                 return 7
 
-    def execute(self, text: str) -> RunResult:
+    def execute(
+        self,
+        text: str,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> RunResult:
         """Run one transactional turn and persist committable outcomes."""
 
         working = self.history.copy()
         previous_summary = getattr(self.runner, "summary_state", None)
         try:
-            result = self.runner.run_turn(working, text)
+            if cancel_check is None:
+                result = self.runner.run_turn(working, text)
+            else:
+                result = self.runner.run_turn(
+                    working, text, cancel_check=cancel_check
+                )
             self.result_sink(result)
         except BaseException:
             self._restore_summary(previous_summary)

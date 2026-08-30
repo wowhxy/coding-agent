@@ -18,6 +18,8 @@ def test_submission_readme_constraints() -> None:
     assert "OPENAI_API_KEY" in text
     assert "DEEPSEEK_API_KEY" in text
     assert "--thinking-mode disabled" in text
+    assert "coding-agent tui --provider deepseek" in text
+    assert "coding-agent doctor" in text
     assert 'python -m coding_agent --provider deepseek "<任务>"' in text
     assert 'coding-agent --provider deepseek "<任务>"' in text
     assert "python -m coding_agent --provider deepseek" in text.splitlines()
@@ -91,6 +93,7 @@ def test_submission_sources_contain_no_credential_like_values() -> None:
         *Path("tests").rglob("*.py"),
         *Path("examples/plugins").rglob("*.py"),
         *Path("docs").rglob("*.md"),
+        *Path("scripts").rglob("*.py"),
         Path("README.txt"),
         Path("pyproject.toml"),
     ]

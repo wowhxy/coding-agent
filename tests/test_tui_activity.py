@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+from pathlib import Path
+
+from textual.widgets import Markdown, Static
+
+from coding_agent.application.events import ActivityStatus, ProductEvent, ProductEventKind
+from coding_agent.application.state import ActivityView, ChangeStatus, ChangeView, VerificationView
+from coding_agent.tui.app import CodingAgentApp
+from coding_agent.tui.widgets import ConversationPane
+from tests.tui_fakes import FakeProductService
+
+
+NOW = datetime(2026, 8, 30, tzinfo=timezone.utc)
+
+
+def test_snapshot_renders_compact_tools_changed_files_and_actual_verification(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        service = FakeProductService(tmp_path)
+        service._activities = (
+            ActivityView("a1", "tool", "read_file", "src/parser.py\nsource", ActivityStatus.SUCCEEDED, 1, True),
+        )
+        service._changes = (
+            ChangeView("src/parser.py", ChangeStatus.MODIFIED, 2, 1, "@@ diff detail"),
+        )
+        service._verifications = (
+            VerificationView("pytest -q", True, "42 passed in 1.8s", "exit_code: 0"),
+        )
+        app = CodingAgentApp(service)
+        async with app.run_test(size=(120, 36)) as pilot:
+            pane = app.query_one("#conversation", ConversationPane)
+            assert "read_file" in pane.plain_text
+            assert "src/parser.py" in pane.plain_text
+            assert "42 passed in 1.8s" in pane.plain_text
+            assert "source" not in pane.plain_text
+            await pilot.press("ctrl+l")
+            assert "source" in pane.plain_text
+            assert "@@ diff detail" in pane.plain_text
+
+    asyncio.run(scenario())
+
+
+def test_compact_tool_activity_keeps_target_but_hides_payload(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service = FakeProductService(tmp_path)
+        service._activities = (
+            ActivityView(
+                "a1",
+                "tool",
+                "read_file",
+                "src/parser.py\nvery large source payload",
+                ActivityStatus.SUCCEEDED,
+                1,
+                True,
+            ),
+        )
+        app = CodingAgentApp(service)
+        async with app.run_test() as pilot:
+            pane = app.query_one("#conversation", ConversationPane)
+            assert "src/parser.py" in pane.plain_text
+            assert "very large source payload" not in pane.plain_text
+            await pilot.press("ctrl+l")
+            assert "very large source payload" in pane.plain_text
+
+    asyncio.run(scenario())
+
+
+def test_live_tool_updates_in_place_and_subagents_form_a_visible_tree(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service = FakeProductService(tmp_path)
+        app = CodingAgentApp(service)
+        async with app.run_test() as pilot:
+            service.publish(ProductEvent(ProductEventKind.TOOL_STARTED, NOW, "s", "task", 2, "execute_command", "pytest -q", ActivityStatus.RUNNING))
+            service.publish(ProductEvent(ProductEventKind.TOOL_FINISHED, NOW, "s", "task", 2, "execute_command", "42 passed", ActivityStatus.SUCCEEDED))
+            service.publish(ProductEvent(ProductEventKind.SUBAGENT_STARTED, NOW, "s", "task", None, "inspect tests", status=ActivityStatus.RUNNING, metadata=(("role", "explore"), ("subagent_id", "subagent-1"))))
+            service.publish(ProductEvent(ProductEventKind.SUBAGENT_FINISHED, NOW, "s", "task", None, "inspection complete", status=ActivityStatus.SUCCEEDED, metadata=(("role", "explore"), ("subagent_id", "subagent-1"))))
+            await pilot.pause()
+            text = app.query_one("#conversation", ConversationPane).plain_text
+            assert text.count("execute_command") == 1
+            assert "succeeded" in text
+            assert text.count("subagent-1") == 1
+            assert "inspection complete" in text
+
+    asyncio.run(scenario())
+
+
+def test_streaming_chunks_update_one_agent_block(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service = FakeProductService(tmp_path)
+        app = CodingAgentApp(service)
+        async with app.run_test() as pilot:
+            service.publish(ProductEvent(ProductEventKind.TEXT_DELTA, NOW, "s", "task", None, "hello ", status=ActivityStatus.RUNNING))
+            service.publish(ProductEvent(ProductEventKind.TEXT_DELTA, NOW, "s", "task", None, "world", status=ActivityStatus.RUNNING))
+            await pilot.pause()
+            pane = app.query_one("#conversation", ConversationPane)
+            assert "hello world" in pane.plain_text
+            assert pane.plain_text.count("hello") == 1
+
+    asyncio.run(scenario())
+
+
+def test_streaming_deltas_do_not_reparse_markdown_for_every_chunk(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service = FakeProductService(tmp_path)
+        app = CodingAgentApp(service)
+        async with app.run_test() as pilot:
+            markdown = app.query_one("#conversation-markdown", Markdown)
+            original_update = markdown.update
+            markdown_updates = 0
+
+            def counted_update(content) -> None:
+                nonlocal markdown_updates
+                markdown_updates += 1
+                original_update(content)
+
+            markdown.update = counted_update  # type: ignore[method-assign]
+            for _index in range(100):
+                service.publish(
+                    ProductEvent(
+                        ProductEventKind.TEXT_DELTA,
+                        NOW,
+                        "s",
+                        "task",
+                        None,
+                        "x",
+                        status=ActivityStatus.RUNNING,
+                    )
+                )
+            await pilot.pause()
+            assert markdown_updates == 0
+            stream = app.query_one("#streaming-text", Static)
+            assert "x" * 100 in str(stream.render())
+
+    asyncio.run(scenario())

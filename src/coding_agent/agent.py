@@ -120,6 +120,11 @@ class AgentRunner:
                 else:
                     model_turn = self.model_client.complete(messages, definitions)
 
+                if cancel_check is not None and cancel_check():
+                    return self._finish(
+                        RunStatus.CANCELLED, None, step, "run cancelled"
+                    )
+
                 if model_turn.tool_calls:
                     history.append(
                         Message(

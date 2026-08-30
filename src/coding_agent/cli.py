@@ -40,6 +40,10 @@ ClientFactory = Callable[[str, str, str, str], ModelClient]
 SecretReader = Callable[[str], str]
 SessionStoreFactory = Callable[[Path], JsonSessionStore]
 InputReader = Callable[[str], str]
+TuiLauncher = Callable[
+    [RuntimeConfig, str, Mapping[str, str], ClientFactory, bool, str | None],
+    int,
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,11 +151,17 @@ def main(
     secret_reader: SecretReader | None = None,
     session_store_factory: SessionStoreFactory = JsonSessionStore,
     input_reader: InputReader = input,
+    tui_launcher: TuiLauncher | None = None,
 ) -> int:
     """Run one coding task or an interactive session."""
 
     parser = _build_parser()
     parsed_argv = list(sys.argv[1:] if argv is None else argv)
+    product_command = (
+        parsed_argv.pop(0)
+        if parsed_argv and parsed_argv[0] in {"doctor", "tui"}
+        else None
+    )
     if any(
         argument == "--api-key" or argument.startswith("--api-key=")
         for argument in parsed_argv
@@ -164,6 +174,8 @@ def main(
         return 2
     try:
         arguments = parser.parse_args(parsed_argv)
+        if product_command is not None and arguments.task is not None:
+            parser.error(f"coding-agent {product_command} does not accept a task argument")
         if arguments.task is not None and (
             arguments.new_session
             or arguments.resume_session is not None
@@ -189,6 +201,27 @@ def main(
         return 2
 
     runtime_environment = dict(os.environ if environ is None else environ)
+    if product_command == "doctor":
+        from .application.diagnostics import render_doctor, run_doctor
+
+        checks = run_doctor(
+            workspace=Path(arguments.workspace),
+            provider=arguments.provider,
+            model=(
+                _prefer_explicit(arguments.model, preset.model)
+                or runtime_environment.get("CODING_AGENT_MODEL")
+            ),
+            base_url=(
+                _prefer_explicit(arguments.base_url, preset.base_url)
+                or runtime_environment.get("CODING_AGENT_BASE_URL")
+            ),
+            api_key_env=api_key_env,
+            environ=runtime_environment,
+            session_home=resolve_session_home(runtime_environment),
+        )
+        print(render_doctor(checks))
+        return 0 if all(item.ok for item in checks) else 2
+
     if not runtime_environment.get(api_key_env):
         reader = secret_reader
         if reader is None and sys.stdin.isatty():
@@ -240,6 +273,27 @@ def main(
         _print_result(result, config.api_key)
         return EXIT_CODES[result.status]
 
+    if product_command == "tui":
+        launcher = tui_launcher or _launch_tui
+        try:
+            return launcher(
+                config,
+                arguments.provider,
+                runtime_environment,
+                client_factory,
+                arguments.new_session,
+                arguments.resume_session,
+            )
+        except SessionError as error:
+            _print_session_error(error, config.api_key)
+            return 7
+        except Exception as exc:
+            print(
+                f"[error] unexpected internal error: {type(exc).__name__}",
+                file=sys.stderr,
+            )
+            return 6
+
     try:
         return _run_interactive(
             config=config,
@@ -265,6 +319,10 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Run one local coding-agent task, or start an interactive "
             "session when task is omitted."
+        ),
+        epilog=(
+            "Product modes: 'coding-agent tui [options]' opens the full-screen "
+            "TUI; 'coding-agent doctor [options]' checks local readiness."
         ),
         allow_abbrev=False,
     )
@@ -352,6 +410,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help="default command timeout in seconds (default: 30)",
     )
     return parser
+
+
+def _launch_tui(
+    config: RuntimeConfig,
+    provider_name: str,
+    runtime_environment: Mapping[str, str],
+    client_factory: ClientFactory,
+    new_session: bool,
+    resume_session: str | None,
+) -> int:
+    """Lazy product entry point so classic CLI has no UI import cost."""
+
+    from .application.service import CodingAgentService
+    from .tui.app import run_tui
+
+    service = CodingAgentService.create(
+        config,
+        provider_name,
+        resolve_session_home(runtime_environment),
+        client_factory,
+        new_session=new_session,
+        resume_session=resume_session,
+    )
+    try:
+        return run_tui(service)
+    finally:
+        service.close()
 
 
 def _run_agent(
