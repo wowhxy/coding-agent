@@ -138,7 +138,18 @@ class AgentRunner:
                             return self._finish(
                                 RunStatus.CANCELLED, None, step, "run cancelled"
                             )
-                        self._emit("tool_requested", step, call.name)
+                        observation = self.registry.observation_for(call.name)
+                        source, activity_kind = (
+                            observation if observation is not None else (None, None)
+                        )
+                        self._emit(
+                            "tool_requested",
+                            step,
+                            call.name,
+                            tool_name=call.name,
+                            tool_source=source,
+                            activity_kind=activity_kind,
+                        )
                         result = self.registry.dispatch(call)
                         history.append(
                             Message(
@@ -151,6 +162,10 @@ class AgentRunner:
                             "tool_result",
                             step,
                             _tool_result_event_message(result),
+                            tool_name=call.name,
+                            tool_source=source,
+                            activity_kind=activity_kind,
+                            tool_ok=result.ok,
                         )
 
                         if result.ok:
@@ -213,9 +228,29 @@ class AgentRunner:
                 error=f"unexpected internal error: {type(exc).__name__}",
             )
 
-    def _emit(self, kind: str, step: int, message: str) -> None:
+    def _emit(
+        self,
+        kind: str,
+        step: int,
+        message: str,
+        *,
+        tool_name: str | None = None,
+        tool_source: str | None = None,
+        activity_kind: str | None = None,
+        tool_ok: bool | None = None,
+    ) -> None:
         if self.event_sink is not None:
-            self.event_sink(AgentEvent(kind, step, message))
+            self.event_sink(
+                AgentEvent(
+                    kind,
+                    step,
+                    message,
+                    tool_name,
+                    tool_source,
+                    activity_kind,
+                    tool_ok,
+                )
+            )
 
     def reset_context_state(self) -> None:
         """Discard session-derived context state when switching sessions."""

@@ -40,6 +40,15 @@ class ActivityStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class ActivitySource(str, Enum):
+    BUILTIN_TOOL = "builtin_tool"
+    PLUGIN_TOOL = "plugin_tool"
+    CONTROL_SUBAGENT = "control_subagent"
+    COMMAND_VERIFICATION = "command_verification"
+    ERROR = "error"
+    TASK = "task"
+
+
 @dataclass(frozen=True, slots=True)
 class ProductEvent:
     """One safe observable product event; never canonical conversation state."""
@@ -53,6 +62,10 @@ class ProductEvent:
     detail: str = ""
     status: ActivityStatus | None = None
     metadata: tuple[tuple[str, str], ...] = ()
+    source: ActivitySource | None = None
+    tool_name: str | None = None
+    plugin_name: str | None = None
+    parent_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, ProductEventKind):
@@ -69,6 +82,11 @@ class ProductEvent:
             raise TypeError("event title and detail must be text")
         if self.status is not None and not isinstance(self.status, ActivityStatus):
             raise TypeError("event status is invalid")
+        if self.source is not None and not isinstance(self.source, ActivitySource):
+            raise TypeError("event source is invalid")
+        for value in (self.tool_name, self.plugin_name, self.parent_id):
+            if value is not None and type(value) is not str:
+                raise TypeError("event observation fields must be text or None")
         if type(self.metadata) is not tuple or any(
             type(pair) is not tuple
             or len(pair) != 2
@@ -92,15 +110,24 @@ def adapt_agent_event(
     kind = ProductEventKind.NOTICE
     status: ActivityStatus | None = None
     metadata: tuple[tuple[str, str], ...] = ()
+    source: ActivitySource | None = None
+    plugin_name: str | None = None
     if event.kind == "tool_requested":
         kind = ProductEventKind.TOOL_STARTED
         status = ActivityStatus.RUNNING
+        source, plugin_name = classify_tool_activity(
+            event.tool_source, event.activity_kind
+        )
     elif event.kind == "tool_result":
         kind = ProductEventKind.TOOL_FINISHED
         status = (
             ActivityStatus.FAILED
-            if ": error" in event.message.casefold()
+            if event.tool_ok is False
+            or (event.tool_ok is None and ": error" in event.message.casefold())
             else ActivityStatus.SUCCEEDED
+        )
+        source, plugin_name = classify_tool_activity(
+            event.tool_source, event.activity_kind
         )
     elif event.kind == "run_finished":
         status_value = _run_status(event.message)
@@ -124,6 +151,9 @@ def adapt_agent_event(
         message,
         status=status,
         metadata=metadata,
+        source=source,
+        tool_name=event.tool_name,
+        plugin_name=plugin_name,
     )
 
 
@@ -169,7 +199,27 @@ def adapt_subagent_event(
         redact_product_text(event.message, sensitive_values),
         status=status,
         metadata=metadata,
+        source=ActivitySource.CONTROL_SUBAGENT,
+        parent_id=f"{task_id}:subagents",
     )
+
+
+def classify_tool_activity(
+    tool_source: str | None,
+    activity_kind: str | None,
+) -> tuple[ActivitySource, str | None]:
+    """Map formal registry observation metadata into a product source."""
+
+    if activity_kind == "command":
+        return ActivitySource.COMMAND_VERIFICATION, None
+    if activity_kind == "control" or (
+        tool_source is not None and tool_source.startswith("control:")
+    ):
+        return ActivitySource.CONTROL_SUBAGENT, None
+    if tool_source is not None and tool_source.startswith("plugin:"):
+        plugin_name = tool_source.removeprefix("plugin:") or None
+        return ActivitySource.PLUGIN_TOOL, plugin_name
+    return ActivitySource.BUILTIN_TOOL, None
 
 
 def redact_product_text(text: str, sensitive_values: tuple[str, ...]) -> str:

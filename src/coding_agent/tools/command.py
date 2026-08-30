@@ -137,7 +137,7 @@ def create_execute_command_tool(
             f"command exited with status {completed.returncode}",
         )
 
-    return RegisteredTool(definition, validate, handle)
+    return RegisteredTool(definition, validate, handle, "command")
 
 
 def _is_positive_int(value: object) -> bool:

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
+from textual import on
 from textual.app import ComposeResult
-from textual.containers import Grid, VerticalScroll
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, Markdown
+from textual.widgets import Button, Input, Label, Markdown, OptionList, Static
+from textual.widgets.option_list import Option
+
+from ..application.state import PluginView, SkillView
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -96,3 +102,244 @@ class ManagementScreen(ModalScreen[None]):
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+
+class CommandPaletteScreen(ModalScreen[str | None]):
+    """Keyboard-first navigation over existing App actions."""
+
+    BINDINGS = [("escape", "close", "Close")]
+    _ACTIONS = (
+        ("new_session", "New Session"),
+        ("switch_session", "Switch Session"),
+        ("skills", "Skills"),
+        ("plugins", "Plugins"),
+        ("memory", "Memory"),
+        ("recall", "Recall"),
+        ("toggle_activity", "Toggle Activity"),
+        ("help", "Help"),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.plain_text = "\n".join(label for _action, label in self._ACTIONS)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="palette-dialog"):
+            yield Label("Command Palette", classes="dialog-title")
+            yield OptionList(
+                *(Option(label, id=action) for action, label in self._ACTIONS),
+                id="palette-list",
+                compact=True,
+            )
+
+    def on_mount(self) -> None:
+        options = self.query_one("#palette-list", OptionList)
+        options.highlighted = 0
+        options.focus()
+
+    @on(OptionList.OptionSelected, "#palette-list")
+    def _selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option_id)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class _ResourceManagementScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "close", "Close")]
+
+    def __init__(
+        self,
+        title: str,
+        items: tuple[SkillView, ...] | tuple[PluginView, ...],
+        on_action: Callable[
+            [str, str], tuple[SkillView, ...] | tuple[PluginView, ...]
+        ],
+        on_error: Callable[[Exception], None] | None = None,
+        *,
+        warning: str = "",
+        primary_label: str,
+        secondary_label: str,
+        allow_clear: bool,
+    ) -> None:
+        super().__init__()
+        self.resource_title = title
+        self.items = items
+        self.on_action = on_action
+        self.on_error = on_error
+        self.warning = warning
+        self.primary_label = primary_label
+        self.secondary_label = secondary_label
+        self.allow_clear = allow_clear
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="resource-dialog"):
+            yield Label(self.resource_title, classes="dialog-title")
+            yield Static(self.warning, id="resource-warning")
+            yield OptionList(id="resource-list", compact=True)
+            yield Markdown("", id="resource-detail")
+            with Horizontal(classes="dialog-actions"):
+                yield Button(self.primary_label, id="resource-primary", variant="primary")
+                yield Button(self.secondary_label, id="resource-secondary")
+                if self.allow_clear:
+                    yield Button("Clear All", id="resource-clear", variant="warning")
+                yield Button("Close", id="resource-close")
+
+    def on_mount(self) -> None:
+        self._render_items()
+        options = self.query_one("#resource-list", OptionList)
+        options.focus()
+
+    @on(OptionList.OptionHighlighted, "#resource-list")
+    def _highlighted(self, _event: OptionList.OptionHighlighted) -> None:
+        self._render_detail()
+
+    @on(Button.Pressed)
+    def _button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "resource-close":
+            self.dismiss(None)
+            return
+        item = self._selected_item()
+        if event.button.id == "resource-clear":
+            action, name = "clear", ""
+        elif item is None:
+            return
+        elif event.button.id == "resource-primary":
+            action, name = self._primary_action(), item.name
+        elif event.button.id == "resource-secondary":
+            action, name = self._secondary_action(), item.name
+        else:
+            return
+        try:
+            self.items = self.on_action(action, name)
+        except Exception as exc:
+            if self.on_error is not None:
+                self.on_error(exc)
+            else:
+                self.app.notify(
+                    f"{self.resource_title} operation failed", severity="error"
+                )
+            return
+        self._render_items(preferred_name=name)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    def _render_items(self, preferred_name: str | None = None) -> None:
+        options = self.query_one("#resource-list", OptionList)
+        options.set_options(
+            Option(self._option_label(item), id=str(index))
+            for index, item in enumerate(self.items)
+        )
+        index = next(
+            (
+                index
+                for index, item in enumerate(self.items)
+                if item.name == preferred_name
+            ),
+            0 if self.items else None,
+        )
+        options.highlighted = index
+        self.query_one("#resource-warning", Static).display = bool(self.warning)
+        self._render_detail()
+
+    def _selected_item(self) -> SkillView | PluginView | None:
+        index = self.query_one("#resource-list", OptionList).highlighted
+        if index is None or index >= len(self.items):
+            return None
+        return self.items[index]
+
+    def _render_detail(self) -> None:
+        item = self._selected_item()
+        body = "No resources found." if item is None else self._detail(item)
+        self.query_one("#resource-detail", Markdown).update(body)
+
+    def _option_label(self, item: SkillView | PluginView) -> str:
+        raise NotImplementedError
+
+    def _detail(self, item: SkillView | PluginView) -> str:
+        raise NotImplementedError
+
+    def _primary_action(self) -> str:
+        raise NotImplementedError
+
+    def _secondary_action(self) -> str:
+        raise NotImplementedError
+
+
+class SkillManagementScreen(_ResourceManagementScreen):
+    def __init__(
+        self,
+        items: tuple[SkillView, ...],
+        on_action: Callable[[str, str], tuple[SkillView, ...]],
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> None:
+        super().__init__(
+            "Skills",
+            items,
+            on_action,
+            on_error,
+            primary_label="Activate",
+            secondary_label="Deactivate",
+            allow_clear=True,
+        )
+
+    def _option_label(self, item: SkillView | PluginView) -> str:
+        assert isinstance(item, SkillView)
+        return f"{item.name}  [{item.activation}]  {item.scope}"
+
+    def _detail(self, item: SkillView | PluginView) -> str:
+        assert isinstance(item, SkillView)
+        return (
+            f"## {item.name}\n\n"
+            f"Status: **{item.activation}**  \nScope: `{item.scope}`\n\n"
+            f"{item.description}"
+        )
+
+    def _primary_action(self) -> str:
+        return "use"
+
+    def _secondary_action(self) -> str:
+        return "off"
+
+
+class PluginManagementScreen(_ResourceManagementScreen):
+    def __init__(
+        self,
+        items: tuple[PluginView, ...],
+        on_action: Callable[[str, str], tuple[PluginView, ...]],
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> None:
+        warning = (
+            items[0].trust_warning
+            if items
+            else "Executable plugins run as trusted local code."
+        )
+        super().__init__(
+            "Plugins",
+            items,
+            on_action,
+            on_error,
+            warning=warning,
+            primary_label="Enable",
+            secondary_label="Disable",
+            allow_clear=False,
+        )
+
+    def _option_label(self, item: SkillView | PluginView) -> str:
+        assert isinstance(item, PluginView)
+        return f"{item.name}  {item.version}  [{item.status}]"
+
+    def _detail(self, item: SkillView | PluginView) -> str:
+        assert isinstance(item, PluginView)
+        return (
+            f"## {item.name}\n\n"
+            f"Version: `{item.version}`  \nStatus: **{item.status}**\n\n"
+            f"{item.description}"
+        )
+
+    def _primary_action(self) -> str:
+        return "enable"
+
+    def _secondary_action(self) -> str:
+        return "disable"

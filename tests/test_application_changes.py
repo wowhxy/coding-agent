@@ -12,7 +12,7 @@ from coding_agent.application.changes import (
     snapshot_workspace,
     verification_views,
 )
-from coding_agent.application.events import ActivityStatus
+from coding_agent.application.events import ActivitySource, ActivityStatus
 from coding_agent.application.state import ChangeStatus
 from coding_agent.protocol import Message, Role, ToolCall, ToolResult
 
@@ -186,3 +186,19 @@ def test_tool_activity_uses_protocol_pairs_and_tolerates_malformed_payloads() ->
     assert "src/parser.py" in activities[0].detail
     assert activities[1].status is ActivityStatus.FAILED
     assert "malformed" in activities[1].detail
+
+
+def test_activity_projection_uses_formal_registry_observation_for_plugin_source() -> None:
+    call = ToolCall("p1", "git_diff", "{}")
+    result = ToolResult("p1", "git_diff", True, "clean")
+
+    activity = activity_views(
+        _tool_messages(call, result),
+        tool_observer=lambda name: (
+            ("plugin:git-readonly", "tool") if name == "git_diff" else None
+        ),
+    )[0]
+
+    assert activity.source is ActivitySource.PLUGIN_TOOL
+    assert activity.tool_name == "git_diff"
+    assert activity.plugin_name == "git-readonly"

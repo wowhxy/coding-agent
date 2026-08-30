@@ -27,6 +27,7 @@ class RegisteredTool:
     definition: ToolDefinition
     validate: ToolValidator
     handler: ToolHandler
+    activity_kind: str = "tool"
 
 
 class ToolRegistry:
@@ -35,6 +36,7 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, RegisteredTool] = {}
         self._sources: dict[str, str] = {}
+        self._historical_observations: dict[str, tuple[str, str]] = {}
 
     def register(self, tool: RegisteredTool) -> None:
         """Register one uniquely named tool."""
@@ -63,6 +65,7 @@ class ToolRegistry:
         for name, tool in zip(names, tools, strict=True):
             self._tools[name] = tool
             self._sources[name] = source
+            self._historical_observations[name] = (source, tool.activity_kind)
 
     def unregister_source(self, source: str) -> tuple[str, ...]:
         """Remove only tools owned by a non-built-in source."""
@@ -81,6 +84,20 @@ class ToolRegistry:
         """Return the registered owner of one tool name."""
 
         return self._sources.get(tool_name)
+
+    def observation_for(self, tool_name: str) -> tuple[str, str] | None:
+        """Return formal product-observation metadata for one active tool."""
+
+        tool = self._tools.get(tool_name)
+        source = self._sources.get(tool_name)
+        if tool is None or source is None:
+            return None
+        return source, tool.activity_kind
+
+    def historical_observation_for(self, tool_name: str) -> tuple[str, str] | None:
+        """Return last formal metadata for display-only historical projection."""
+
+        return self._historical_observations.get(tool_name)
 
     def definitions(self) -> tuple[ToolDefinition, ...]:
         """Return model-facing definitions in deterministic registration order."""
@@ -182,6 +199,8 @@ def _validate_registered_tool(tool: Any) -> None:
         raise ValueError("tool input schema is not JSON serializable") from None
     if not callable(tool.validate) or not callable(tool.handler):
         raise TypeError("tool validator and handler must be callable")
+    if tool.activity_kind not in {"tool", "command", "control"}:
+        raise ValueError("tool activity kind is invalid")
 
 
 def _failure(call: ToolCall, error_code: str, error_message: str) -> ToolResult:

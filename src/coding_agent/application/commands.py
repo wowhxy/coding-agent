@@ -44,6 +44,12 @@ class CommandHelp:
     description: str
 
 
+@dataclass(frozen=True, slots=True)
+class CommandSuggestion:
+    value: str
+    description: str
+
+
 class CommandError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
@@ -61,9 +67,63 @@ _HELP = (
     CommandHelp("/help", "Show commands and keyboard shortcuts."),
 )
 
+_TOP_LEVEL_SUGGESTIONS = (
+    CommandSuggestion("/new", "Create a new session"),
+    CommandSuggestion("/sessions", "Show sessions"),
+    CommandSuggestion("/session ", "Switch or search sessions"),
+    CommandSuggestion("/rename ", "Rename the active session"),
+    CommandSuggestion("/delete", "Delete the active session"),
+    CommandSuggestion("/memory ", "Manage workspace memory"),
+    CommandSuggestion("/skills", "Manage Skills"),
+    CommandSuggestion("/skill ", "Activate or deactivate Skills"),
+    CommandSuggestion("/plugins", "Manage trusted Plugins"),
+    CommandSuggestion("/plugin ", "Enable or disable a Plugin"),
+    CommandSuggestion("/recall ", "Search prior sessions"),
+    CommandSuggestion("/help", "Show help"),
+)
+
+_SUBCOMMAND_SUGGESTIONS = {
+    "/session ": (
+        CommandSuggestion("/session search ", "Search sessions"),
+    ),
+    "/memory ": (
+        CommandSuggestion("/memory add ", "Add workspace memory"),
+        CommandSuggestion("/memory delete ", "Delete memory by ID"),
+        CommandSuggestion("/memory clear", "Clear workspace memory"),
+    ),
+    "/skill ": (
+        CommandSuggestion("/skill use ", "Activate a Skill"),
+        CommandSuggestion("/skill off ", "Deactivate a Skill"),
+        CommandSuggestion("/skill clear", "Deactivate all Skills"),
+    ),
+    "/plugin ": (
+        CommandSuggestion("/plugin enable ", "Enable a trusted Plugin"),
+        CommandSuggestion("/plugin disable ", "Disable a Plugin"),
+    ),
+}
+
 
 def command_help() -> tuple[CommandHelp, ...]:
     return _HELP
+
+
+def command_suggestions(text: str) -> tuple[CommandSuggestion, ...]:
+    """Return deterministic completions for a single-line slash prefix."""
+
+    if type(text) is not str:
+        raise TypeError("suggestion text must be a string")
+    if not text.startswith("/") or "\n" in text or "\r" in text:
+        return ()
+    prefix = text.casefold()
+    if prefix in _SUBCOMMAND_SUGGESTIONS:
+        return _SUBCOMMAND_SUGGESTIONS[prefix]
+    if " " in prefix:
+        return ()
+    return tuple(
+        item
+        for item in _TOP_LEVEL_SUGGESTIONS
+        if item.value.casefold().startswith(prefix)
+    )
 
 
 def parse_command(text: str) -> ProductCommand | None:
@@ -145,4 +205,3 @@ def _management_command(
 def _subcommand(argument: str) -> tuple[str, str]:
     action, separator, value = argument.partition(" ")
     return action.casefold(), value.strip() if separator else ""
-

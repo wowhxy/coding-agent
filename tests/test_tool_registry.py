@@ -31,7 +31,7 @@ def _handle_echo(call_id: str, arguments: dict[str, Any]) -> ToolResult:
     return ToolResult(call_id, "echo", True, output)
 
 
-def _echo_tool(name: str = "echo") -> RegisteredTool:
+def _echo_tool(name: str = "echo", *, activity_kind: str = "tool") -> RegisteredTool:
     return RegisteredTool(
         ToolDefinition(
             name,
@@ -48,6 +48,7 @@ def _echo_tool(name: str = "echo") -> RegisteredTool:
         ),
         _validate_echo,
         _handle_echo,
+        activity_kind,
     )
 
 
@@ -211,10 +212,35 @@ def test_transactional_source_registration_and_cleanup_preserve_builtins() -> No
         "plugin_first",
         "plugin_second",
     )
+    assert registry.observation_for("plugin_first") is None
+    assert registry.historical_observation_for("plugin_first") == (
+        "plugin:demo",
+        "tool",
+    )
     assert [item.name for item in registry.definitions()] == ["builtin_echo"]
     assert registry.unregister_source("plugin:demo") == ()
     with pytest.raises(ValueError, match="built-in"):
         registry.unregister_source("builtin")
+
+
+def test_observation_uses_registered_source_and_activity_kind() -> None:
+    registry = ToolRegistry()
+    registry.register(_echo_tool("run_check", activity_kind="command"))
+    registry.register_many((_echo_tool("git_diff"),), source="plugin:git-readonly")
+
+    assert registry.observation_for("run_check") == ("builtin", "command")
+    assert registry.observation_for("git_diff") == (
+        "plugin:git-readonly",
+        "tool",
+    )
+    assert registry.observation_for("missing") is None
+
+
+def test_invalid_activity_kind_is_rejected_before_registration() -> None:
+    registry = ToolRegistry()
+
+    with pytest.raises(ValueError, match="activity kind"):
+        registry.register(_echo_tool("bad_kind", activity_kind="display-guess"))
 
 
 @pytest.mark.parametrize(

@@ -17,12 +17,17 @@ from coding_agent.config import RuntimeConfig
 from coding_agent.model import ModelTransportError
 from coding_agent.protocol import Message, ModelTurn, RunStatus, ToolCall, ToolDefinition
 from coding_agent.tui.app import CodingAgentApp
-from coding_agent.tui.screens import ConfirmScreen
-from coding_agent.tui.widgets import Composer, ConversationPane
+from coding_agent.tui.screens import (
+    ConfirmScreen,
+    PluginManagementScreen,
+    SkillManagementScreen,
+)
+from coding_agent.tui.widgets import ActivityPane, Composer, ConversationPane
 from tests.fakes import FakeModelClient
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tui_demo" / "buggy_project"
+PLUGIN_EXAMPLE = Path("examples/plugins/git-readonly")
 
 
 def _command(*arguments: str) -> str:
@@ -110,10 +115,29 @@ async def _wait_until_idle(app: CodingAgentApp, pilot, timeout: float = 10) -> N
     await pilot.pause()
 
 
+async def _submit_ui_command(app: CodingAgentApp, pilot, text: str) -> None:
+    composer = app.query_one("#composer", Composer)
+    composer.text = text
+    await pilot.press("ctrl+enter")
+    await pilot.pause()
+
+
+def _install_tui_resources(workspace: Path, home: Path) -> None:
+    skill = workspace / ".coding-agent" / "skills" / "tdd" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: tdd\ndescription: Test changes before completion.\n---\n\n"
+        "Run focused tests before reporting completion.\n",
+        encoding="utf-8",
+    )
+    shutil.copytree(PLUGIN_EXAMPLE, home / "plugins" / "git-readonly")
+
+
 def test_real_product_repairs_with_tools_three_subagents_and_resumes(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     shutil.copytree(FIXTURE, workspace)
     home = tmp_path / "home"
+    _install_tui_resources(workspace, home)
     test_command = _command("-m", "pytest", "-q")
     parent = StreamingParentClient(
         [
@@ -159,6 +183,7 @@ def test_real_product_repairs_with_tools_three_subagents_and_resumes(tmp_path: P
                     ToolCall("after", "execute_command", json.dumps({"command": test_command})),
                 )
             ),
+            ModelTurn(tool_calls=(ToolCall("git", "git_status", "{}"),)),
             ModelTurn("## Fixed\n\nUnicode parsing is fixed and the test passes."),
         ]
     )
@@ -175,20 +200,43 @@ def test_real_product_repairs_with_tools_three_subagents_and_resumes(tmp_path: P
 
     async def first_launch() -> None:
         app = CodingAgentApp(service)
-        async with app.run_test(size=(80, 24)) as pilot:
+        async with app.run_test(size=(120, 36)) as pilot:
+            await _submit_ui_command(app, pilot, "/skills")
+            assert isinstance(app.screen, SkillManagementScreen)
+            await pilot.click("#resource-primary")
+            await pilot.click("#resource-close")
+            assert service.snapshot().status.active_skills == ("tdd",)
+
+            await _submit_ui_command(app, pilot, "/plugins")
+            assert isinstance(app.screen, PluginManagementScreen)
+            await pilot.click("#resource-primary")
+            await pilot.click("#resource-close")
+            assert service.snapshot().status.enabled_plugins == ("git-readonly",)
+
             composer = app.query_one("#composer", Composer)
             composer.text = "Fix the Unicode parser failure using parallel investigation."
             await pilot.press("ctrl+enter")
             await _wait_until_idle(app, pilot)
             pane = app.query_one("#conversation", ConversationPane)
+            activity = app.query_one("#activity", ActivityPane)
             assert "Unicode parsing is fixed" in pane.plain_text
-            assert all(f"subagent-{index}" in pane.plain_text for index in (1, 2, 3))
-            assert "parser.py" in pane.plain_text
-            assert "passed" in pane.plain_text
+            assert all(
+                f"subagent-{index}" in activity.plain_text for index in (1, 2, 3)
+            )
+            assert "parser.py" in activity.plain_text
+            assert "passed" in activity.plain_text
+            assert "[command] execute_command" in activity.plain_text
+            assert "[plugin:git-readonly] git_status" in activity.plain_text
+            assert "subagent-1" not in pane.plain_text
+            assert "git_status" not in pane.plain_text
             assert composer.display and pane.display
             assert isinstance(app.screen, ConfirmScreen)
             await pilot.click("#confirm")
             assert service.snapshot().status.memory_count == 1
+            await _submit_ui_command(app, pilot, "/skills")
+            await pilot.click("#resource-secondary")
+            await pilot.click("#resource-close")
+            assert service.snapshot().status.active_skills == ()
             app.exit()
 
     asyncio.run(first_launch())
@@ -208,7 +256,11 @@ def test_real_product_repairs_with_tools_three_subagents_and_resumes(tmp_path: P
             snapshot = resumed.snapshot()
             assert snapshot.status.session_id == original_session
             assert snapshot.status.memory_count == 1
+            assert snapshot.status.enabled_plugins == ("git-readonly",)
             assert any("Unicode parsing is fixed" in item.content for item in snapshot.conversation)
+            assert "[plugin:git-readonly] git_status" in app.query_one(
+                "#activity", ActivityPane
+            ).plain_text
             await pilot.press("ctrl+n")
             new_snapshot = resumed.snapshot()
             assert new_snapshot.status.session_id != original_session
@@ -245,7 +297,7 @@ def test_real_product_recovers_after_provider_failure(tmp_path: Path) -> None:
             await pilot.press("ctrl+enter")
             await _wait_until_idle(app, pilot)
             assert composer.disabled is False
-            failure_text = app.query_one("#conversation", ConversationPane).plain_text
+            failure_text = app.query_one("#activity", ActivityPane).plain_text
             assert "Provider Error" in failure_text
             assert "provider unavailable" in failure_text
             composer.text = "retry"

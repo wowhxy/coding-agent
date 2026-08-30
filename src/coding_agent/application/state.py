@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-from .events import ActivityStatus
+from .events import ActivitySource, ActivityStatus
 
 
 class AgentState(str, Enum):
@@ -46,7 +46,7 @@ class SessionView:
 
     @property
     def display_name(self) -> str:
-        return self.name or f"Session {self.session_id[:6]}"
+        return self.name or "Untitled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +66,10 @@ class ActivityView:
     status: ActivityStatus
     step: int | None
     expandable: bool
+    source: ActivitySource = ActivitySource.BUILTIN_TOOL
+    tool_name: str | None = None
+    plugin_name: str | None = None
+    parent_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

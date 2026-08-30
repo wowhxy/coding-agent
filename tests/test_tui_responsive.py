@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 from coding_agent.tui.app import CodingAgentApp
-from coding_agent.tui.widgets import Composer, ConversationPane
+from coding_agent.tui.widgets import ActivityPane, Composer, ConversationPane
 from coding_agent.application.state import ConversationItem, ConversationKind
 from tests.tui_fakes import FakeProductService
 
@@ -19,6 +19,7 @@ def test_80x24_hides_sidebar_but_keeps_conversation_and_composer_visible(
             assert app.has_class("compact")
             assert app.query_one("#session-sidebar").display is False
             assert app.query_one("#conversation", ConversationPane).region.height > 0
+            assert app.query_one("#activity", ActivityPane).region.height > 0
             assert app.query_one("#composer", Composer).region.height > 0
 
     asyncio.run(scenario())

@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 from coding_agent.tui.app import CodingAgentApp
-from coding_agent.tui.widgets import Composer
+from coding_agent.tui.widgets import Composer, SlashCommandSuggestions
 from tests.tui_fakes import FakeProductService
 
 
@@ -82,3 +82,34 @@ def test_escape_returns_focus_and_ctrl_c_clears_idle_input(tmp_path: Path) -> No
 
     asyncio.run(scenario())
 
+
+def test_slash_suggestions_narrow_and_tab_accepts_without_submitting(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service = FakeProductService(tmp_path)
+        app = CodingAgentApp(service)
+        async with app.run_test() as pilot:
+            composer = app.query_one("#composer", Composer)
+            suggestions = app.query_one("#slash-suggestions", SlashCommandSuggestions)
+            composer.text = "/s"
+            await pilot.pause()
+            assert suggestions.display is True
+            assert suggestions.values == (
+                "/sessions", "/session ", "/skills", "/skill ",
+            )
+            await pilot.press("tab")
+            assert composer.text == "/sessions"
+            assert service.tasks == []
+            composer.text = "/skill "
+            await pilot.pause()
+            assert suggestions.values == (
+                "/skill use ", "/skill off ", "/skill clear",
+            )
+            await pilot.press("down", "tab")
+            assert composer.text == "/skill off "
+            await pilot.press("escape")
+            assert suggestions.display is False
+            composer.text = "ordinary task"
+            await pilot.pause()
+            assert suggestions.display is False
+
+    asyncio.run(scenario())

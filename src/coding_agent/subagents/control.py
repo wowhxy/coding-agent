@@ -139,4 +139,4 @@ def create_delegate_tasks_tool(manager: SubagentManager) -> RegisteredTool:
         )
         return ToolResult(call_id, "delegate_tasks", True, output)
 
-    return RegisteredTool(definition, validate, handle)
+    return RegisteredTool(definition, validate, handle, "control")

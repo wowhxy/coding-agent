@@ -62,7 +62,7 @@ def test_session_navigation_rename_delete_and_resume_are_transactional(tmp_path:
     service.submit_task("second")
 
     sessions = service.list_sessions()
-    assert {item.display_name for item in sessions} == {"Parser fix", f"Session {second.session_id[:6]}"}
+    assert {item.display_name for item in sessions} == {"Parser fix", "Untitled"}
     service.switch_session(first_id)
     assert service.snapshot().conversation[-1].content == "first done"
     service.delete_session()

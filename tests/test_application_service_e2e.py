@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from coding_agent.application.events import ProductEventKind
+from coding_agent.application.events import ActivitySource, ProductEventKind
 from coding_agent.application.service import CodingAgentService
 from coding_agent.config import RuntimeConfig
 from coding_agent.protocol import ModelTurn, RunStatus, ToolCall
@@ -46,4 +46,15 @@ def test_real_core_tools_surface_activity_changes_and_verification(tmp_path: Pat
     assert any(event.kind is ProductEventKind.TOOL_STARTED for event in events)
     assert any(event.kind is ProductEventKind.FILE_CHANGES for event in events)
     assert any(event.kind is ProductEventKind.VERIFICATION for event in events)
+    command_event = next(
+        event
+        for event in events
+        if event.kind is ProductEventKind.TOOL_STARTED
+        and event.tool_name == "execute_command"
+    )
+    verification_event = next(
+        event for event in events if event.kind is ProductEventKind.VERIFICATION
+    )
+    assert command_event.source is ActivitySource.COMMAND_VERIFICATION
+    assert verification_event.source is ActivitySource.COMMAND_VERIFICATION
     service.close()

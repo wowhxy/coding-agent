@@ -5,20 +5,24 @@ from .commands import (
     CommandError,
     CommandHelp,
     CommandName,
+    CommandSuggestion,
     ProductCommand,
     command_help,
+    command_suggestions,
     parse_command,
 )
-from .events import ActivityStatus, ProductEvent, ProductEventKind
+from .events import ActivitySource, ActivityStatus, ProductEvent, ProductEventKind
 from .service import CodingAgentService
 from .state import ProductSnapshot, ProductStatus
 
 __all__ = [
     "ActivityStatus",
+    "ActivitySource",
     "CommandAction",
     "CommandError",
     "CommandHelp",
     "CommandName",
+    "CommandSuggestion",
     "CodingAgentService",
     "ProductCommand",
     "ProductEvent",
@@ -26,5 +30,6 @@ __all__ = [
     "ProductSnapshot",
     "ProductStatus",
     "command_help",
+    "command_suggestions",
     "parse_command",
 ]

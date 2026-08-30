@@ -9,7 +9,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.widgets import Footer, Static
+from textual.widgets import Footer, Static, TextArea
 
 from ..application.commands import (
     CommandAction,
@@ -18,11 +18,37 @@ from ..application.commands import (
     command_help,
     parse_command,
 )
-from ..application.events import ActivityStatus, ProductEvent, ProductEventKind
+from ..application.events import (
+    ActivitySource,
+    ActivityStatus,
+    ProductEvent,
+    ProductEventKind,
+)
 from ..application.service import CodingAgentService
 from ..application.state import AgentState, ProductSnapshot
-from .screens import ConfirmScreen, HelpScreen, ManagementScreen
-from .widgets import Composer, ConversationPane, ProductStatusBar, SessionSidebar
+from ..config import ConfigError
+from ..model import ModelClientError
+from ..plugins import PluginError
+from ..session import SessionError
+from ..tools.paths import WorkspacePathError
+from ..tools.registry import ToolArgumentError
+from .screens import (
+    CommandPaletteScreen,
+    ConfirmScreen,
+    HelpScreen,
+    ManagementScreen,
+    PluginManagementScreen,
+    SkillManagementScreen,
+    TextPromptScreen,
+)
+from .widgets import (
+    ActivityPane,
+    Composer,
+    ConversationPane,
+    ProductStatusBar,
+    SessionSidebar,
+    SlashCommandSuggestions,
+)
 
 
 class ProductEventMessage(Message):
@@ -49,6 +75,7 @@ class CodingAgentApp(App[None]):
         Binding("ctrl+n", "new_session", "New session", priority=True),
         Binding("ctrl+b", "toggle_sidebar", "Sessions", priority=True),
         Binding("ctrl+l", "toggle_activity", "Activity", priority=True),
+        Binding("ctrl+p", "command_palette", "Commands", priority=True),
         Binding("ctrl+k", "show_help", "Help", priority=True),
         Binding("ctrl+q", "request_quit", "Quit", priority=True),
     ]
@@ -63,6 +90,7 @@ class CodingAgentApp(App[None]):
         self._input_history: list[str] = []
         self._history_index = 0
         self._last_transient_error: ProductEvent | None = None
+        self._phase = "Ready"
 
     def compose(self) -> ComposeResult:
         yield Static("Coding Agent", id="product-header")
@@ -70,7 +98,9 @@ class CodingAgentApp(App[None]):
             yield SessionSidebar()
             with Vertical(id="main-panel"):
                 yield ConversationPane()
+                yield SlashCommandSuggestions()
                 yield Composer()
+            yield ActivityPane()
         yield ProductStatusBar(id="status-bar")
         yield Footer()
 
@@ -102,12 +132,18 @@ class CodingAgentApp(App[None]):
         composer.disabled = False
         self._refresh_all(self.service.snapshot())
         if self._last_transient_error is not None:
-            self.query_one("#conversation", ConversationPane).apply_event(
+            self.query_one("#activity", ActivityPane).apply_event(
                 self._last_transient_error
             )
             self._last_transient_error = None
         self._offer_pending_candidate()
         composer.focus()
+
+    @on(TextArea.Changed, "#composer")
+    def _composer_changed(self, event: TextArea.Changed) -> None:
+        self.query_one(
+            "#slash-suggestions", SlashCommandSuggestions
+        ).update_for(event.text_area.text)
 
     def action_submit(self) -> None:
         if self._running_task:
@@ -139,19 +175,7 @@ class CodingAgentApp(App[None]):
         try:
             self.service.submit_task(text)
         except Exception as exc:
-            self.post_message(
-                ProductEventMessage(
-                    ProductEvent(
-                        ProductEventKind.ERROR,
-                        _utc_now(),
-                        None,
-                        None,
-                        None,
-                        f"Internal Error: {type(exc).__name__}",
-                        status=ActivityStatus.FAILED,
-                    )
-                )
-            )
+            self.post_message(ProductEventMessage(_exception_event(exc)))
         finally:
             self.post_message(TaskWorkerFinished())
 
@@ -165,7 +189,27 @@ class CodingAgentApp(App[None]):
         composer.focus()
 
     def action_focus_input(self) -> None:
+        self.query_one(
+            "#slash-suggestions", SlashCommandSuggestions
+        ).dismiss_suggestions()
         self.query_one("#composer", Composer).focus()
+
+    def action_accept_suggestion(self) -> bool:
+        suggestions = self.query_one(
+            "#slash-suggestions", SlashCommandSuggestions
+        )
+        value = suggestions.accept_highlighted()
+        if value is None:
+            return False
+        self._set_composer_text(value)
+        suggestions.update_for(value)
+        self.query_one("#composer", Composer).focus()
+        return True
+
+    def action_navigate_suggestion(self, direction: int) -> bool:
+        return self.query_one(
+            "#slash-suggestions", SlashCommandSuggestions
+        ).navigate(direction)
 
     def action_new_session(self) -> None:
         if self._running_task:
@@ -180,11 +224,30 @@ class CodingAgentApp(App[None]):
         self.query_one("#session-sidebar").display = self._sidebar_requested
 
     def action_toggle_activity(self) -> None:
-        self.query_one("#conversation", ConversationPane).toggle_activity_detail()
-        self._refresh_all(self.service.snapshot())
+        activity = self.query_one("#activity", ActivityPane)
+        activity.display = not activity.display
 
     def action_show_help(self) -> None:
         self.push_screen(HelpScreen(_help_markdown()))
+
+    def action_command_palette(self) -> None:
+        self.push_screen(CommandPaletteScreen(), self._palette_selected)
+
+    def action_show_skills(self) -> None:
+        self.push_screen(
+            SkillManagementScreen(
+                self.service.list_skills(), self._manage_skill, self._show_product_error
+            )
+        )
+
+    def action_show_plugins(self) -> None:
+        self.push_screen(
+            PluginManagementScreen(
+                self.service.list_plugins(),
+                self._manage_plugin,
+                self._show_product_error,
+            )
+        )
 
     def action_request_quit(self) -> None:
         if self._running_task:
@@ -225,6 +288,7 @@ class CodingAgentApp(App[None]):
     def apply_product_event(self, event: ProductEvent) -> None:
         pane = self.query_one("#conversation", ConversationPane)
         pane.apply_event(event)
+        self.query_one("#activity", ActivityPane).apply_event(event)
         if event.kind is ProductEventKind.TASK_STARTED:
             self._last_transient_error = None
             self._running_task = True
@@ -242,13 +306,16 @@ class CodingAgentApp(App[None]):
                 self._last_transient_error = event
         elif event.kind is ProductEventKind.ERROR:
             self._last_transient_error = event
+        self._phase = _phase_for_event(event, current=self._phase)
         status_getter = getattr(self.service, "get_status", None)
         status = (
             status_getter()
             if callable(status_getter)
             else self.service.snapshot().status
         )
-        self.query_one("#status-bar", ProductStatusBar).update_status(status)
+        self.query_one("#status-bar", ProductStatusBar).update_status(
+            status, self._phase
+        )
 
     def _execute_command(self, command) -> None:
         try:
@@ -266,10 +333,7 @@ class CodingAgentApp(App[None]):
                 self.action_show_help()
             self._refresh_all(self.service.snapshot())
         except Exception as exc:
-            self.notify(
-                f"{type(exc).__name__}: operation failed",
-                severity="error",
-            )
+            self._show_product_error(exc)
 
     def _execute_session_command(self, command) -> None:
         if command.action is CommandAction.NEW:
@@ -310,38 +374,70 @@ class CodingAgentApp(App[None]):
 
     def _execute_skill_command(self, command) -> None:
         if command.action is CommandAction.LIST:
-            items = self.service.list_skills()
-            body = "\n".join(
-                f"- **{item.name}** [{item.activation}] — {item.description}"
-                for item in items
-            ) or "No skills found."
-            self.push_screen(ManagementScreen("Skills", body))
+            self.action_show_skills()
         elif command.action is CommandAction.USE:
-            self.service.use_skill(command.argument)
+            self._manage_skill("use", command.argument)
         elif command.action is CommandAction.OFF:
-            self.service.off_skill(command.argument)
+            self._manage_skill("off", command.argument)
         elif command.action is CommandAction.CLEAR:
-            self.service.clear_skills()
+            self._manage_skill("clear", "")
 
     def _execute_plugin_command(self, command) -> None:
         if command.action is CommandAction.LIST:
-            items = self.service.list_plugins()
-            body = (
-                "Executable plugins run as **trusted local code**.\n\n"
-                + (
-                    "\n".join(
-                        f"- **{item.name}** {item.version} [{item.status}] — "
-                        f"{item.description}"
-                        for item in items
-                    )
-                    or "No plugins found."
-                )
-            )
-            self.push_screen(ManagementScreen("Plugins", body))
+            self.action_show_plugins()
         elif command.action is CommandAction.ENABLE:
-            self.service.enable_plugin(command.argument)
+            self._manage_plugin("enable", command.argument)
         elif command.action is CommandAction.DISABLE:
-            self.service.disable_plugin(command.argument)
+            self._manage_plugin("disable", command.argument)
+
+    def _manage_skill(self, action: str, name: str):
+        if action == "use":
+            self.service.use_skill(name)
+        elif action == "off":
+            self.service.off_skill(name)
+        elif action == "clear":
+            self.service.clear_skills()
+        else:
+            raise ValueError("unknown Skill action")
+        return self.service.list_skills()
+
+    def _manage_plugin(self, action: str, name: str):
+        if action == "enable":
+            self.service.enable_plugin(name)
+        elif action == "disable":
+            self.service.disable_plugin(name)
+        else:
+            raise ValueError("unknown Plugin action")
+        return self.service.list_plugins()
+
+    def _palette_selected(self, action: str | None) -> None:
+        if action is None:
+            return
+        if action == "new_session":
+            self.action_new_session()
+        elif action == "switch_session":
+            self._sidebar_requested = True
+            sidebar = self.query_one("#session-sidebar")
+            sidebar.display = True
+            self.query_one("#session-list").focus()
+        elif action == "skills":
+            self.action_show_skills()
+        elif action == "plugins":
+            self.action_show_plugins()
+        elif action == "memory":
+            command = parse_command("/memory")
+            assert command is not None
+            self._execute_command(command)
+        elif action == "recall":
+            self.push_screen(TextPromptScreen("Recall query"), self._palette_recall)
+        elif action == "toggle_activity":
+            self.action_toggle_activity()
+        elif action == "help":
+            self.action_show_help()
+
+    def _palette_recall(self, query: str | None) -> None:
+        if query:
+            self._show_recall(query)
 
     def _show_recall(self, query: str) -> None:
         results = self.service.recall(query)
@@ -350,6 +446,11 @@ class CodingAgentApp(App[None]):
             for item in results
         ) or "No matching history in this workspace."
         self.push_screen(ManagementScreen(f"Recall: {query}", body))
+
+    def _show_product_error(self, exc: Exception) -> None:
+        event = _exception_event(exc)
+        self.apply_product_event(event)
+        self.notify(event.title, severity="error")
 
     def _delete_session_confirmed(self, confirmed: bool) -> None:
         if confirmed:
@@ -395,11 +496,19 @@ class CodingAgentApp(App[None]):
             snapshot.sessions
         )
         self.query_one("#conversation", ConversationPane).show_snapshot(snapshot)
-        self.query_one("#status-bar", ProductStatusBar).update_status(snapshot.status)
+        self.query_one("#activity", ActivityPane).show_snapshot(snapshot)
+        self.query_one("#status-bar", ProductStatusBar).update_status(
+            snapshot.status, self._phase
+        )
         header = self.query_one("#product-header", Static)
+        active = next(
+            (item for item in snapshot.sessions if item.active),
+            None,
+        )
+        session_name = active.display_name if active is not None else "Untitled"
         header.update(
-            f"Coding Agent  {snapshot.status.provider}/{snapshot.status.model}  "
-            f"{snapshot.status.workspace}  {snapshot.status.session_id[:6]}"
+            f"Coding Agent  {snapshot.status.workspace.name}  "
+            f"{session_name} · {snapshot.status.session_id[:6]}"
         )
 
     def _apply_responsive(self, width: int) -> None:
@@ -407,6 +516,7 @@ class CodingAgentApp(App[None]):
         self.set_class(compact, "compact")
         sidebar = self.query_one("#session-sidebar")
         sidebar.display = self._sidebar_requested and not compact
+        self.query_one("#status-bar", ProductStatusBar).refresh_width()
 
     def _set_composer_text(self, value: str) -> None:
         composer = self.query_one("#composer", Composer)
@@ -434,7 +544,8 @@ def _help_markdown() -> str:
         "## Keys\n\n"
         "- `Ctrl+Enter` submit\n- `Enter` newline\n- `Ctrl+C` cancel/clear\n"
         "- `Esc` focus input\n- `Ctrl+N` new session\n- `Ctrl+B` sessions\n"
-        "- `Ctrl+L` activity detail\n- `Ctrl+Q` quit\n\n"
+        "- `Ctrl+L` toggle Activity\n- `Ctrl+P` command palette\n"
+        "- `Ctrl+Q` quit\n\n"
         "## Commands\n\n" + commands
     )
 
@@ -443,3 +554,63 @@ def _utc_now():
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc)
+
+
+def _phase_for_event(
+    event: ProductEvent,
+    *,
+    current: str,
+) -> str:
+    if event.kind is ProductEventKind.TASK_STARTED:
+        return "Working"
+    if event.kind is ProductEventKind.MODEL_WAITING:
+        return event.title or "Waiting for provider"
+    if event.kind is ProductEventKind.TOOL_STARTED:
+        return "Running tool"
+    if event.kind is ProductEventKind.TOOL_FINISHED:
+        return "Working"
+    if event.kind in {
+        ProductEventKind.SUBAGENT_BATCH,
+        ProductEventKind.SUBAGENT_STARTED,
+        ProductEventKind.SUBAGENT_FINISHED,
+    }:
+        return "Parallel investigation"
+    if event.kind is ProductEventKind.VERIFICATION:
+        return "Verifying"
+    if event.kind is ProductEventKind.FILE_CHANGES:
+        return "Reviewing changes"
+    if event.kind is ProductEventKind.FINAL_RESPONSE:
+        return "Ready"
+    if event.kind is ProductEventKind.SESSION_CHANGED:
+        return "Ready"
+    if event.kind in {ProductEventKind.ERROR, ProductEventKind.TASK_FAILED}:
+        return "Error"
+    if event.kind is ProductEventKind.TASK_CANCELLED:
+        return "Cancelled"
+    return current
+
+
+def _exception_event(exc: Exception) -> ProductEvent:
+    if isinstance(exc, PluginError):
+        title, detail = "Plugin Error", exc.message
+    elif isinstance(exc, SessionError):
+        title, detail = "Session Error", exc.message
+    elif isinstance(exc, ConfigError):
+        title, detail = "Configuration Error", str(exc).strip() or "invalid configuration"
+    elif isinstance(exc, ModelClientError):
+        title, detail = "Provider Error", str(exc).strip() or "provider request failed"
+    elif isinstance(exc, (ToolArgumentError, WorkspacePathError)):
+        title, detail = "Tool Error", str(exc).strip() or "tool operation failed"
+    else:
+        title, detail = f"Internal Error: {type(exc).__name__}", ""
+    return ProductEvent(
+        ProductEventKind.ERROR,
+        _utc_now(),
+        None,
+        None,
+        None,
+        title,
+        detail,
+        ActivityStatus.FAILED,
+        source=ActivitySource.ERROR,
+    )

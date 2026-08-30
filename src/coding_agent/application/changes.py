@@ -9,10 +9,16 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from ..protocol import Message, Role, ToolCall
-from .events import ActivityStatus, redact_product_text
+from .events import (
+    ActivitySource,
+    ActivityStatus,
+    classify_tool_activity,
+    redact_product_text,
+)
 from .state import ActivityView, ChangeStatus, ChangeView, VerificationView
 
 
@@ -134,6 +140,7 @@ def activity_views(
     start: int = 0,
     *,
     sensitive_values: tuple[str, ...] = (),
+    tool_observer: Callable[[str], tuple[str, str] | None] | None = None,
 ) -> tuple[ActivityView, ...]:
     """Project canonical ToolCall/ToolResult pairs into concise activities."""
 
@@ -181,10 +188,23 @@ def activity_views(
                     status,
                     None,
                     bool(detail),
+                    *_activity_observation(call.name, tool_observer),
                 )
             )
             ordinal += 1
     return tuple(activities)
+
+
+def _activity_observation(
+    tool_name: str,
+    observer: Callable[[str], tuple[str, str] | None] | None,
+) -> tuple[ActivitySource, str, str | None]:
+    observation = observer(tool_name) if observer is not None else None
+    source_name, activity_kind = (
+        observation if observation is not None else (None, None)
+    )
+    source, plugin_name = classify_tool_activity(source_name, activity_kind)
+    return source, tool_name, plugin_name
 
 
 def verification_views(

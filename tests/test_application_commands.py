@@ -6,6 +6,7 @@ from coding_agent.application.commands import (
     CommandAction,
     CommandError,
     CommandName,
+    command_suggestions,
     command_help,
     parse_command,
 )
@@ -66,3 +67,27 @@ def test_help_is_discoverable_and_covers_every_command_group() -> None:
     for command in ("/new", "/session", "/memory", "/skill", "/plugin", "/recall", "/help"):
         assert command in usages
     assert all(item.description.strip() for item in entries)
+
+
+def test_slash_suggestions_are_deterministic_and_prefix_aware() -> None:
+    assert [item.value for item in command_suggestions("/s")] == [
+        "/sessions",
+        "/session ",
+        "/skills",
+        "/skill ",
+    ]
+    assert [item.value for item in command_suggestions("/skill ")] == [
+        "/skill use ",
+        "/skill off ",
+        "/skill clear",
+    ]
+    assert [item.value for item in command_suggestions("/plugin ")] == [
+        "/plugin enable ",
+        "/plugin disable ",
+    ]
+
+
+def test_slash_suggestions_ignore_normal_tasks_and_completed_commands() -> None:
+    assert command_suggestions("fix the parser") == ()
+    assert command_suggestions("/help now") == ()
+    assert command_suggestions("first line\n/skill") == ()

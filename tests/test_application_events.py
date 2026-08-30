@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import pytest
 
 from coding_agent.application.events import (
+    ActivitySource,
     ActivityStatus,
     ProductEvent,
     ProductEventKind,
@@ -45,13 +46,27 @@ def test_agent_tool_events_map_to_started_and_failed_without_leaking_secret() ->
     secret = "live-provider-secret"
 
     started = adapt_agent_event(
-        AgentEvent("tool_requested", 2, f"execute_command {secret}"),
+        AgentEvent(
+            "tool_requested",
+            2,
+            f"execute_command {secret}",
+            "execute_command",
+            "builtin",
+            "command",
+        ),
         session_id="111111111111",
         task_id="task-1",
         sensitive_values=(secret,),
     )
     failed = adapt_agent_event(
-        AgentEvent("tool_result", 2, f"execute_command: error COMMAND_FAILED {secret}"),
+        AgentEvent(
+            "tool_result",
+            2,
+            f"execute_command: error COMMAND_FAILED {secret}",
+            "execute_command",
+            "builtin",
+            "command",
+        ),
         session_id="111111111111",
         task_id="task-1",
         sensitive_values=(secret,),
@@ -68,6 +83,29 @@ def test_agent_tool_events_map_to_started_and_failed_without_leaking_secret() ->
     assert secret not in started.title + failed.title
     assert "[REDACTED]" in started.title + failed.title
     assert started.timestamp.tzinfo is not None
+    assert started.source is ActivitySource.COMMAND_VERIFICATION
+    assert started.tool_name == "execute_command"
+    assert started.plugin_name is None
+
+
+def test_plugin_tool_source_is_structured_by_adapter_not_title_parsing() -> None:
+    event = adapt_agent_event(
+        AgentEvent(
+            "tool_requested",
+            1,
+            "an intentionally unrelated title",
+            "git_diff",
+            "plugin:git-readonly",
+            "tool",
+        ),
+        session_id="111111111111",
+        task_id="task-1",
+        sensitive_values=(),
+    )
+
+    assert event.source is ActivitySource.PLUGIN_TOOL
+    assert event.tool_name == "git_diff"
+    assert event.plugin_name == "git-readonly"
 
 
 def test_subagent_lifecycle_maps_running_completed_and_failed() -> None:
@@ -111,6 +149,8 @@ def test_subagent_lifecycle_maps_running_completed_and_failed() -> None:
         ActivityStatus.SUCCEEDED,
     )
     assert failed.status is ActivityStatus.FAILED
+    assert started.source is ActivitySource.CONTROL_SUBAGENT
+    assert started.parent_id == "task-1:subagents"
     assert started.metadata == (
         ("role", "explore"),
         ("subagent_id", "subagent-1"),
@@ -127,3 +167,18 @@ def test_unknown_agent_event_remains_an_observable_notice() -> None:
 
     assert event.kind is ProductEventKind.NOTICE
     assert event.metadata == (("core_kind", "future_event"),)
+
+
+def test_error_event_requires_explicit_error_source_when_projected() -> None:
+    event = ProductEvent(
+        ProductEventKind.ERROR,
+        datetime(2026, 8, 29, tzinfo=timezone.utc),
+        "111111111111",
+        "task-1",
+        None,
+        "Provider Error",
+        status=ActivityStatus.FAILED,
+        source=ActivitySource.ERROR,
+    )
+
+    assert event.source is ActivitySource.ERROR

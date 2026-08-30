@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from textual import events, on
 from textual.app import ComposeResult
@@ -10,8 +11,14 @@ from textual.containers import Vertical
 from textual.widgets import Input, Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
-from ..application.events import ActivityStatus, ProductEvent, ProductEventKind
-from ..application.state import ProductSnapshot, ProductStatus, SessionView
+from ..application.events import (
+    ActivitySource,
+    ActivityStatus,
+    ProductEvent,
+    ProductEventKind,
+)
+from ..application.commands import command_suggestions
+from ..application.state import ActivityView, ProductSnapshot, ProductStatus, SessionView
 
 
 class Composer(TextArea):
@@ -27,6 +34,19 @@ class Composer(TextArea):
         )
 
     async def _on_key(self, event: events.Key) -> None:
+        if event.key == "tab":
+            action = getattr(self.app, "action_accept_suggestion", None)
+            if callable(action) and action():
+                event.prevent_default()
+                event.stop()
+                return
+        if event.key in {"up", "down"}:
+            action = getattr(self.app, "action_navigate_suggestion", None)
+            direction = -1 if event.key == "up" else 1
+            if callable(action) and action(direction):
+                event.prevent_default()
+                event.stop()
+                return
         if event.key == "up" and self.cursor_location[0] == 0:
             action = getattr(self.app, "action_history_previous", None)
             if callable(action):
@@ -45,6 +65,39 @@ class Composer(TextArea):
                 event.stop()
                 return
         await super()._on_key(event)
+
+
+class SlashCommandSuggestions(OptionList):
+    """Small deterministic completion list driven by the command grammar."""
+
+    def __init__(self, *, id: str = "slash-suggestions") -> None:
+        super().__init__(id=id, compact=True)
+        self.values: tuple[str, ...] = ()
+
+    def update_for(self, text: str) -> None:
+        suggestions = command_suggestions(text)
+        self.values = tuple(item.value for item in suggestions)
+        self.set_options(
+            Option(f"{item.value}  — {item.description}", id=str(index))
+            for index, item in enumerate(suggestions)
+        )
+        self.highlighted = 0 if suggestions else None
+        self.display = bool(suggestions)
+
+    def accept_highlighted(self) -> str | None:
+        if self.highlighted is None or self.highlighted >= len(self.values):
+            return None
+        return self.values[self.highlighted]
+
+    def navigate(self, direction: int) -> bool:
+        if not self.display or not self.values or direction not in {-1, 1}:
+            return False
+        current = self.highlighted if self.highlighted is not None else 0
+        self.highlighted = (current + direction) % len(self.values)
+        return True
+
+    def dismiss_suggestions(self) -> None:
+        self.display = False
 
 
 class SessionSidebar(Vertical):
@@ -101,7 +154,7 @@ class SessionSidebar(Vertical):
 
 
 class ConversationPane(Vertical):
-    """Scrollable Markdown conversation plus bounded observable activity."""
+    """Scrollable canonical user/assistant conversation only."""
 
     can_focus = True
 
@@ -110,29 +163,15 @@ class ConversationPane(Vertical):
         self.plain_text = ""
         self._stream_text = ""
         self._base_plain = ""
-        self._activity_records: list[dict[str, object]] = []
-        self._expanded = False
         self._workspace = ""
-        self._session_id = ""
 
     def compose(self) -> ComposeResult:
         yield Static("", id="empty-state")
         yield Markdown("", id="conversation-markdown")
         yield Static("", id="streaming-text", markup=False)
-        yield Static("", id="activity-panel")
 
     def show_snapshot(self, snapshot: ProductSnapshot) -> None:
         self._workspace = str(snapshot.status.workspace)
-        preserved_subagents = (
-            [
-                record
-                for record in self._activity_records
-                if str(record["key"]).startswith("subagent:")
-            ]
-            if self._session_id == snapshot.status.session_id
-            else []
-        )
-        self._session_id = snapshot.status.session_id
         blocks: list[str] = []
         plain: list[str] = []
         for item in snapshot.conversation:
@@ -144,57 +183,14 @@ class ConversationPane(Vertical):
         streaming.update("")
         streaming.display = False
         self._base_plain = "\n".join(plain)
-        self._activity_records = [
-            {
-                "key": f"snapshot:{item.id}",
-                "title": _compact_activity_title(item.title, item.detail),
-                "status": item.status,
-                "detail": _remaining_activity_detail(item.detail),
-                "always_detail": False,
-            }
-            for item in snapshot.activities
-        ]
-        self._activity_records.extend(preserved_subagents)
-        for change in snapshot.changes:
-            marker = {
-                "added": "A",
-                "modified": "M",
-                "deleted": "D",
-            }[change.status.value]
-            self._activity_records.append(
-                {
-                    "key": f"change:{change.path}",
-                    "title": (
-                        f"{marker} {change.path} "
-                        f"+{change.additions} -{change.deletions}"
-                    ),
-                    "status": ActivityStatus.SUCCEEDED,
-                    "detail": change.diff,
-                    "always_detail": False,
-                }
-            )
-        for index, verification in enumerate(snapshot.verifications):
-            self._activity_records.append(
-                {
-                    "key": f"verification:{index}:{verification.command}",
-                    "title": f"{verification.command}: {verification.summary}",
-                    "status": (
-                        ActivityStatus.SUCCEEDED
-                        if verification.ok
-                        else ActivityStatus.FAILED
-                    ),
-                    "detail": verification.detail,
-                    "always_detail": False,
-                }
-            )
         self.query_one("#conversation-markdown", Markdown).update("\n\n".join(blocks))
-        self._render_activities()
+        self._sync_plain_text()
         empty = self.query_one("#empty-state", Static)
-        empty.display = not blocks and not self._activity_records
+        empty.display = not blocks
         empty.update(
-            "Coding Agent\n\n"
+            "Start coding with your agent\n\n"
             f"Workspace: {self._workspace}\n\n"
-            "Type a coding task below to begin.\n"
+            "Describe a task below, or type / to discover commands.\n"
             "Examples: Fix the failing tests | Explain this repository | Add parser tests"
         )
 
@@ -209,120 +205,11 @@ class ConversationPane(Vertical):
         elif event.kind is ProductEventKind.TEXT_DELTA:
             self._stream_text += event.title
             self._render_stream()
-        elif event.kind in {
-            ProductEventKind.MODEL_WAITING,
-            ProductEventKind.TOOL_STARTED,
-            ProductEventKind.TOOL_FINISHED,
-            ProductEventKind.SUBAGENT_BATCH,
-            ProductEventKind.SUBAGENT_STARTED,
-            ProductEventKind.SUBAGENT_FINISHED,
-            ProductEventKind.VERIFICATION,
-            ProductEventKind.FILE_CHANGES,
-        }:
-            self._upsert_event_activity(event)
-        elif event.kind in {
-            ProductEventKind.ERROR,
-            ProductEventKind.TASK_FAILED,
-            ProductEventKind.TASK_CANCELLED,
-        }:
-            self._activity_records.append(
-                {
-                    "key": f"error:{len(self._activity_records)}",
-                    "title": event.title,
-                    "status": event.status or ActivityStatus.FAILED,
-                    "detail": event.detail,
-                    "always_detail": True,
-                }
-            )
-            self._render_activities()
 
-    def toggle_activity_detail(self) -> None:
-        self._expanded = not self._expanded
-
-    def _upsert_event_activity(self, event: ProductEvent) -> None:
-        metadata = dict(event.metadata)
-        status = event.status or ActivityStatus.RUNNING
-        match_index: int | None = None
-        key: str
-        title = event.title
-        if event.kind in {ProductEventKind.TOOL_STARTED, ProductEventKind.TOOL_FINISHED}:
-            key = f"tool:{event.step}:{len(self._activity_records)}"
-            if event.kind is ProductEventKind.TOOL_FINISHED:
-                match_index = self._latest_running_index("tool:", event.step)
-        elif event.kind in {
-            ProductEventKind.SUBAGENT_STARTED,
-            ProductEventKind.SUBAGENT_FINISHED,
-        }:
-            child_id = metadata.get("subagent_id", "subagent")
-            role = metadata.get("role", "worker")
-            key = f"subagent:{child_id}"
-            title = f"{child_id} ({role}): {event.title}"
-            match_index = self._record_index(key)
-        else:
-            key = f"event:{event.kind.value}:{event.step}:{len(self._activity_records)}"
-        record = {
-            "key": key,
-            "title": title,
-            "status": status,
-            "detail": event.detail,
-            "always_detail": False,
-            "step": event.step,
-        }
-        if match_index is None:
-            self._activity_records.append(record)
-        else:
-            record["key"] = self._activity_records[match_index]["key"]
-            self._activity_records[match_index] = record
-        self._render_activities()
-
-    def _latest_running_index(self, prefix: str, step: int | None) -> int | None:
-        for index in range(len(self._activity_records) - 1, -1, -1):
-            record = self._activity_records[index]
-            if (
-                str(record["key"]).startswith(prefix)
-                and record.get("step") == step
-                and record["status"] is ActivityStatus.RUNNING
-            ):
-                return index
-        return None
-
-    def _record_index(self, key: str) -> int | None:
-        return next(
-            (
-                index
-                for index, record in enumerate(self._activity_records)
-                if record["key"] == key
-            ),
-            None,
-        )
-
-    def _render_activities(self) -> None:
-        lines = [
-            _activity_line(
-                str(record["title"]),
-                record["status"],
-                str(record["detail"]),
-                self._expanded or bool(record["always_detail"]),
-            )
-            for record in self._activity_records
-        ]
-        self.query_one("#activity-panel", Static).update("\n".join(lines))
-        self._sync_plain_text(lines)
-
-    def _sync_plain_text(self, activity_lines: list[str] | None = None) -> None:
-        if activity_lines is None:
-            activity_lines = [
-                _activity_line(
-                    str(record["title"]),
-                    record["status"],
-                    str(record["detail"]),
-                    self._expanded or bool(record["always_detail"]),
-                )
-                for record in self._activity_records
-            ]
+    def _sync_plain_text(self) -> None:
         stream = self._stream_text.replace("**", "")
         self.plain_text = "\n".join(
-            part for part in (self._base_plain, *activity_lines, stream) if part
+            part for part in (self._base_plain, stream) if part
         )
 
     def _render_stream(self) -> None:
@@ -334,55 +221,418 @@ class ConversationPane(Vertical):
         self._sync_plain_text()
 
 
+@dataclass(slots=True)
+class _ActivityRecord:
+    key: str
+    source: ActivitySource
+    title: str
+    detail: str
+    status: ActivityStatus
+    step: int | None = None
+    tool_name: str | None = None
+    plugin_name: str | None = None
+    parent_id: str | None = None
+    live: bool = False
+
+
+class ActivityPane(Vertical):
+    """Independent operational timeline with selectable bounded details."""
+
+    _MAX_RECORDS = 200
+
+    def __init__(self, *, id: str = "activity") -> None:
+        super().__init__(id=id)
+        self.plain_text = ""
+        self._records: list[_ActivityRecord] = []
+        self._detail_open = False
+        self._session_id = ""
+
+    def compose(self) -> ComposeResult:
+        yield Static("Activity", classes="panel-title")
+        yield OptionList(id="activity-list", compact=True)
+        yield Static("Select an item and press Enter for details", id="activity-detail")
+
+    def show_snapshot(self, snapshot: ProductSnapshot) -> None:
+        live = (
+            [
+                record
+                for record in self._records
+                if record.live
+                and (
+                    record.key.startswith("subagent:")
+                    or record.key.endswith(":subagents")
+                )
+            ]
+            if self._session_id == snapshot.status.session_id
+            else []
+        )
+        self._session_id = snapshot.status.session_id
+        records = [_record_from_activity(item) for item in snapshot.activities]
+        records.extend(live)
+        for change in snapshot.changes:
+            marker = {"added": "A", "modified": "M", "deleted": "D"}[
+                change.status.value
+            ]
+            records.append(
+                _ActivityRecord(
+                    f"change:{change.path}",
+                    ActivitySource.TASK,
+                    f"[change] {marker} {change.path} +{change.additions} -{change.deletions}",
+                    change.diff,
+                    ActivityStatus.SUCCEEDED,
+                )
+            )
+        for index, verification in enumerate(snapshot.verifications):
+            records.append(
+                _ActivityRecord(
+                    f"verification:{index}:{verification.command}",
+                    ActivitySource.COMMAND_VERIFICATION,
+                    f"[verify] {verification.command} · {verification.summary}",
+                    verification.detail,
+                    ActivityStatus.SUCCEEDED if verification.ok else ActivityStatus.FAILED,
+                )
+            )
+        self._records = records[-self._MAX_RECORDS :]
+        self._render_records()
+
+    def apply_event(self, event: ProductEvent) -> None:
+        if event.kind in {
+            ProductEventKind.TEXT_DELTA,
+            ProductEventKind.FINAL_RESPONSE,
+            ProductEventKind.SESSION_CHANGED,
+            ProductEventKind.MEMORY_CANDIDATE,
+            ProductEventKind.RECALL_RESULT,
+            ProductEventKind.NOTICE,
+        }:
+            return
+        record, replace_key = _record_from_event(event, len(self._records))
+        if record is None:
+            return
+        index = self._find_replace_index(replace_key, record)
+        if index is None:
+            self._records.append(record)
+            self._records = self._records[-self._MAX_RECORDS :]
+        else:
+            record.key = self._records[index].key
+            self._records[index] = record
+        self._render_records()
+
+    def toggle_selected_detail(self) -> None:
+        option_list = self.query_one("#activity-list", OptionList)
+        if option_list.highlighted is None or not self._records:
+            return
+        self._detail_open = not self._detail_open
+        self._render_detail()
+
+    @on(OptionList.OptionSelected, "#activity-list")
+    def _activity_selected(self, _event: OptionList.OptionSelected) -> None:
+        self.toggle_selected_detail()
+
+    @on(OptionList.OptionHighlighted, "#activity-list")
+    def _activity_highlighted(self, _event: OptionList.OptionHighlighted) -> None:
+        self._render_detail()
+
+    def _find_replace_index(
+        self, replace_key: str | None, record: _ActivityRecord
+    ) -> int | None:
+        if replace_key is not None:
+            return next(
+                (index for index, item in enumerate(self._records) if item.key == replace_key),
+                None,
+            )
+        if record.tool_name is None or record.status is ActivityStatus.RUNNING:
+            return None
+        for index in range(len(self._records) - 1, -1, -1):
+            item = self._records[index]
+            if (
+                item.tool_name == record.tool_name
+                and item.step == record.step
+                and item.status is ActivityStatus.RUNNING
+            ):
+                return index
+        return None
+
+    def _render_records(self) -> None:
+        option_list = self.query_one("#activity-list", OptionList)
+        selected_key = (
+            self._records[option_list.highlighted].key
+            if option_list.highlighted is not None
+            and option_list.highlighted < len(self._records)
+            else None
+        )
+        should_follow = not option_list.options or option_list.is_vertical_scroll_end
+        option_list.set_options(
+            Option(_activity_line(item), id=item.key) for item in self._records
+        )
+        selected_index = (
+            len(self._records) - 1
+            if should_follow and self._records
+            else next(
+                (
+                    index
+                    for index, item in enumerate(self._records)
+                    if item.key == selected_key
+                ),
+                0 if self._records else None,
+            )
+        )
+        option_list.highlighted = selected_index
+        self._render_detail()
+        if should_follow and self._records:
+            self.call_after_refresh(option_list.scroll_end, animate=False)
+
+    def _render_detail(self) -> None:
+        option_list = self.query_one("#activity-list", OptionList)
+        detail_widget = self.query_one("#activity-detail", Static)
+        detail = ""
+        if (
+            self._detail_open
+            and option_list.highlighted is not None
+            and option_list.highlighted < len(self._records)
+        ):
+            detail = self._records[option_list.highlighted].detail
+        detail_widget.display = bool(detail)
+        detail_widget.update(detail)
+        lines = [_activity_line(item) for item in self._records]
+        if detail:
+            lines.append(detail)
+        self.plain_text = "\n".join(lines)
+
+
 class ProductStatusBar(Static):
     """One compact line of product state rather than implementation payloads."""
 
-    def update_status(self, status: ProductStatus) -> None:
-        self.update(
-            f"{status.provider}/{status.model}  "
-            f"ws {status.workspace.name}  "
-            f"session {status.session_id[:6]}  "
-            f"ctx {status.context_percent}%  "
-            f"summary {'on' if status.summary_active else 'off'}  "
-            f"mem {status.memory_count}  "
-            f"skills {len(status.active_skills)}  "
-            f"plugins {len(status.enabled_plugins)}  "
-            f"subagents {status.active_subagents}  "
-            f"{status.agent_state.value}"
-        )
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.plain_text = ""
+        self._status: ProductStatus | None = None
+        self._phase = "Ready"
+
+    def update_status(self, status: ProductStatus, phase: str = "") -> None:
+        self._status = status
+        if phase:
+            self._phase = phase
+        compact = 0 < self.size.width < 96
+        if compact:
+            parts = [
+                f"{status.provider}/{status.model}",
+                f"ctx {status.context_percent}%",
+                f"sum {'on' if status.summary_active else 'off'}",
+                f"mem {status.memory_count}",
+                f"sk {len(status.active_skills)}",
+                f"pl {len(status.enabled_plugins)}",
+            ]
+        else:
+            parts = [
+                f"{status.provider}/{status.model}",
+                f"ctx {status.context_percent}%",
+                f"summary {'on' if status.summary_active else 'off'}",
+                f"memory {status.memory_count}",
+                f"skills {len(status.active_skills)}",
+                f"plugins {len(status.enabled_plugins)}",
+            ]
+        if status.active_subagents:
+            parts.append(f"subagents {status.active_subagents}")
+        parts.append(self._phase)
+        self.plain_text = "  ".join(parts)
+        self.update(self.plain_text)
+
+    def refresh_width(self) -> None:
+        if self._status is not None:
+            self.update_status(self._status, self._phase)
 
 
 def _session_label(item: SessionView) -> str:
     active = "●" if item.active else " "
     running = " working" if item.running else ""
-    result = f" {item.result_status.lower()}" if item.result_status else ""
+    result = ""
+    if item.result_status and not item.running:
+        result_label = (
+            "completed"
+            if item.result_status == "FINAL_RESPONSE"
+            else "cancelled"
+            if item.result_status == "CANCELLED"
+            else "error"
+        )
+        result = f" {result_label}"
     return f"{active} {item.display_name}\n  {item.session_id[:6]}{running}{result}"
 
 
-def _activity_line(
-    title: str,
-    status: ActivityStatus,
-    detail: str,
-    expanded: bool,
+def _record_from_activity(item: ActivityView) -> _ActivityRecord:
+    target, separator, remaining = item.detail.partition("\n")
+    title = _source_title(item.source, item.tool_name or item.title, item.plugin_name)
+    if target.strip():
+        title += f" · {target.strip()}"
+    return _ActivityRecord(
+        f"snapshot:{item.id}",
+        item.source,
+        title,
+        remaining if separator else "",
+        item.status,
+        item.step,
+        item.tool_name,
+        item.plugin_name,
+        item.parent_id,
+    )
+
+
+def _record_from_event(
+    event: ProductEvent,
+    ordinal: int,
+) -> tuple[_ActivityRecord | None, str | None]:
+    source = event.source or _event_source(event.kind)
+    status = event.status or ActivityStatus.RUNNING
+    if event.kind in {ProductEventKind.TOOL_STARTED, ProductEventKind.TOOL_FINISHED}:
+        name = event.tool_name or event.title
+        title = _source_title(source, name, event.plugin_name)
+        detail = event.detail
+        if event.kind is ProductEventKind.TOOL_FINISHED and event.title != name:
+            detail = "\n".join(part for part in (event.title, detail) if part)
+        return (
+            _ActivityRecord(
+                f"tool:{event.step}:{name}:{ordinal}",
+                source,
+                title,
+                detail,
+                status,
+                event.step,
+                name,
+                event.plugin_name,
+                event.parent_id,
+                True,
+            ),
+            None,
+        )
+    if event.kind is ProductEventKind.SUBAGENT_BATCH:
+        key = event.parent_id or f"{event.task_id}:subagents"
+        return (
+            _ActivityRecord(
+                key,
+                ActivitySource.CONTROL_SUBAGENT,
+                f"[subagent] Parallel batch · {event.title}",
+                event.detail,
+                status,
+                parent_id=key,
+                live=True,
+            ),
+            key,
+        )
+    if event.kind in {
+        ProductEventKind.SUBAGENT_STARTED,
+        ProductEventKind.SUBAGENT_FINISHED,
+    }:
+        metadata = dict(event.metadata)
+        child_id = metadata.get("subagent_id", "subagent")
+        role = metadata.get("role", "worker")
+        key = f"subagent:{child_id}"
+        return (
+            _ActivityRecord(
+                key,
+                ActivitySource.CONTROL_SUBAGENT,
+                f"  [subagent] {child_id} ({role}) · {event.title}",
+                event.detail,
+                status,
+                parent_id=event.parent_id,
+                live=True,
+            ),
+            key,
+        )
+    if event.kind is ProductEventKind.VERIFICATION:
+        command = event.detail.strip()
+        label = f"[verify] {command}" if command else "[verify] Verification"
+        if event.title:
+            label += f" · {event.title}"
+        return (
+            _ActivityRecord(
+                f"verify:{ordinal}", source, label, "", status, live=True
+            ),
+            None,
+        )
+    if event.kind is ProductEventKind.FILE_CHANGES:
+        return (
+            _ActivityRecord(
+                f"changes:{ordinal}", source, f"[change] {event.title}", event.detail,
+                status, live=True,
+            ),
+            None,
+        )
+    if event.kind is ProductEventKind.TASK_STARTED:
+        return (
+            _ActivityRecord(
+                f"task:{event.task_id}", ActivitySource.TASK, "[state] Working",
+                event.title, status, live=True,
+            ),
+            None,
+        )
+    if event.kind is ProductEventKind.MODEL_WAITING:
+        return (
+            _ActivityRecord(
+                f"waiting:{ordinal}", ActivitySource.TASK,
+                f"[state] {event.title}", event.detail, status, live=True,
+            ),
+            None,
+        )
+    if event.kind in {ProductEventKind.ERROR, ProductEventKind.TASK_FAILED}:
+        summary = event.detail.splitlines()[0].strip() if event.detail else ""
+        title = f"[error] {event.title}"
+        if summary:
+            title += f" · {summary[:160]}"
+        return (
+            _ActivityRecord(
+                f"error:{ordinal}", ActivitySource.ERROR, title,
+                event.detail, status, live=True,
+            ),
+            None,
+        )
+    if event.kind is ProductEventKind.TASK_CANCELLED:
+        return (
+            _ActivityRecord(
+                f"cancelled:{ordinal}", ActivitySource.TASK,
+                f"[state] {event.title}", event.detail, status, live=True,
+            ),
+            None,
+        )
+    return None, None
+
+
+def _event_source(kind: ProductEventKind) -> ActivitySource:
+    if kind in {ProductEventKind.ERROR, ProductEventKind.TASK_FAILED}:
+        return ActivitySource.ERROR
+    if kind is ProductEventKind.VERIFICATION:
+        return ActivitySource.COMMAND_VERIFICATION
+    if kind in {
+        ProductEventKind.SUBAGENT_BATCH,
+        ProductEventKind.SUBAGENT_STARTED,
+        ProductEventKind.SUBAGENT_FINISHED,
+    }:
+        return ActivitySource.CONTROL_SUBAGENT
+    return ActivitySource.TASK
+
+
+def _source_title(
+    source: ActivitySource,
+    name: str,
+    plugin_name: str | None,
 ) -> str:
+    if source is ActivitySource.PLUGIN_TOOL:
+        return f"[plugin:{plugin_name or 'unknown'}] {name}"
+    if source is ActivitySource.CONTROL_SUBAGENT:
+        return f"[subagent] {name}"
+    if source is ActivitySource.COMMAND_VERIFICATION:
+        return f"[command] {name}"
+    if source is ActivitySource.ERROR:
+        return f"[error] {name}"
+    if source is ActivitySource.TASK:
+        return f"[state] {name}"
+    return f"[tool] {name}"
+
+
+def _activity_line(record: _ActivityRecord) -> str:
     icon = {
-        ActivityStatus.RUNNING: "◌",
-        ActivityStatus.QUEUED: "·",
-        ActivityStatus.SUCCEEDED: "✓",
-        ActivityStatus.FAILED: "✗",
-        ActivityStatus.CANCELLED: "■",
-    }[status]
-    line = f"{icon} {title} [{status.value}]"
-    if expanded and detail:
-        line += "\n  " + detail.replace("\n", "\n  ")
-    return line
-
-
-def _compact_activity_title(title: str, detail: str) -> str:
-    first_line = detail.splitlines()[0].strip() if detail else ""
-    return f"{title}\n  {first_line}" if first_line else title
-
-
-def _remaining_activity_detail(detail: str) -> str:
-    _first, separator, remaining = detail.partition("\n")
-    return remaining if separator else ""
+        ActivityStatus.RUNNING: ">",
+        ActivityStatus.QUEUED: ".",
+        ActivityStatus.SUCCEEDED: "+",
+        ActivityStatus.FAILED: "!",
+        ActivityStatus.CANCELLED: "x",
+    }[record.status]
+    return f"{icon} {record.title} [{record.status.value}]"

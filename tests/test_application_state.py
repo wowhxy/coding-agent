@@ -63,7 +63,7 @@ def test_status_rejects_impossible_context_and_subagent_counts(tmp_path: Path) -
         )
 
 
-def test_unnamed_session_uses_short_identifier_as_secondary_fallback() -> None:
+def test_unnamed_session_uses_human_friendly_untitled_name() -> None:
     session = SessionView(
         "123456789abc",
         None,
@@ -73,5 +73,4 @@ def test_unnamed_session_uses_short_identifier_as_secondary_fallback() -> None:
         None,
     )
 
-    assert session.display_name == "Session 123456"
-
+    assert session.display_name == "Untitled"

@@ -379,10 +379,40 @@ def test_events_report_requested_tool_result_and_final_protocol_status() -> None
     ).run("system", "task")
 
     assert events == [
-        AgentEvent("tool_requested", 1, "inspect"),
-        AgentEvent("tool_result", 1, "inspect: ok"),
+        AgentEvent("tool_requested", 1, "inspect", "inspect", "builtin", "tool"),
+        AgentEvent(
+            "tool_result", 1, "inspect: ok", "inspect", "builtin", "tool", True
+        ),
         AgentEvent("run_finished", 2, "FINAL_RESPONSE"),
     ]
+
+
+def test_plugin_tool_events_carry_registry_owned_source_without_display_parsing() -> None:
+    events: list[AgentEvent] = []
+    tool = RegisteredTool(
+        ToolDefinition("git_diff", "Read a diff.", {"type": "object"}),
+        lambda arguments: arguments,
+        lambda call_id, _arguments: ToolResult(call_id, "git_diff", True, "diff"),
+    )
+    registry = ToolRegistry()
+    registry.register_many((tool,), source="plugin:git-readonly")
+    model = FakeModelClient(
+        [
+            ModelTurn(tool_calls=(ToolCall("p1", "git_diff", "{}"),)),
+            ModelTurn("done"),
+        ]
+    )
+
+    AgentRunner(
+        model,
+        registry,
+        ContextManager(),
+        event_sink=events.append,
+    ).run("system", "task")
+
+    assert events[0].tool_name == "git_diff"
+    assert events[0].tool_source == "plugin:git-readonly"
+    assert events[0].activity_kind == "tool"
 
 
 def test_fake_model_client_records_snapshots_and_rejects_exhaustion() -> None:

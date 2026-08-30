@@ -4,12 +4,17 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
-from textual.widgets import Markdown, Static
+from textual.widgets import Markdown, OptionList, Static
 
-from coding_agent.application.events import ActivityStatus, ProductEvent, ProductEventKind
+from coding_agent.application.events import (
+    ActivitySource,
+    ActivityStatus,
+    ProductEvent,
+    ProductEventKind,
+)
 from coding_agent.application.state import ActivityView, ChangeStatus, ChangeView, VerificationView
 from coding_agent.tui.app import CodingAgentApp
-from coding_agent.tui.widgets import ConversationPane
+from coding_agent.tui.widgets import ActivityPane, ConversationPane
 from tests.tui_fakes import FakeProductService
 
 
@@ -22,7 +27,11 @@ def test_snapshot_renders_compact_tools_changed_files_and_actual_verification(
     async def scenario() -> None:
         service = FakeProductService(tmp_path)
         service._activities = (
-            ActivityView("a1", "tool", "read_file", "src/parser.py\nsource", ActivityStatus.SUCCEEDED, 1, True),
+            ActivityView(
+                "a1", "tool", "read_file", "src/parser.py\nsource",
+                ActivityStatus.SUCCEEDED, 1, True,
+                ActivitySource.BUILTIN_TOOL, "read_file",
+            ),
         )
         service._changes = (
             ChangeView("src/parser.py", ChangeStatus.MODIFIED, 2, 1, "@@ diff detail"),
@@ -32,14 +41,17 @@ def test_snapshot_renders_compact_tools_changed_files_and_actual_verification(
         )
         app = CodingAgentApp(service)
         async with app.run_test(size=(120, 36)) as pilot:
-            pane = app.query_one("#conversation", ConversationPane)
-            assert "read_file" in pane.plain_text
-            assert "src/parser.py" in pane.plain_text
-            assert "42 passed in 1.8s" in pane.plain_text
-            assert "source" not in pane.plain_text
-            await pilot.press("ctrl+l")
-            assert "source" in pane.plain_text
-            assert "@@ diff detail" in pane.plain_text
+            conversation = app.query_one("#conversation", ConversationPane)
+            activity = app.query_one("#activity", ActivityPane)
+            assert "read_file" not in conversation.plain_text
+            assert "pytest" not in conversation.plain_text
+            assert "[tool] read_file" in activity.plain_text
+            assert "src/parser.py" in activity.plain_text
+            assert "[verify] pytest -q" in activity.plain_text
+            assert "source" not in activity.plain_text
+            app.query_one("#activity-list", OptionList).highlighted = 0
+            activity.toggle_selected_detail()
+            assert "source" in activity.plain_text
 
     asyncio.run(scenario())
 
@@ -60,11 +72,11 @@ def test_compact_tool_activity_keeps_target_but_hides_payload(tmp_path: Path) ->
         )
         app = CodingAgentApp(service)
         async with app.run_test() as pilot:
-            pane = app.query_one("#conversation", ConversationPane)
-            assert "src/parser.py" in pane.plain_text
-            assert "very large source payload" not in pane.plain_text
-            await pilot.press("ctrl+l")
-            assert "very large source payload" in pane.plain_text
+            activity = app.query_one("#activity", ActivityPane)
+            assert "src/parser.py" in activity.plain_text
+            assert "very large source payload" not in activity.plain_text
+            activity.toggle_selected_detail()
+            assert "very large source payload" in activity.plain_text
 
     asyncio.run(scenario())
 
@@ -74,16 +86,131 @@ def test_live_tool_updates_in_place_and_subagents_form_a_visible_tree(tmp_path: 
         service = FakeProductService(tmp_path)
         app = CodingAgentApp(service)
         async with app.run_test() as pilot:
-            service.publish(ProductEvent(ProductEventKind.TOOL_STARTED, NOW, "s", "task", 2, "execute_command", "pytest -q", ActivityStatus.RUNNING))
-            service.publish(ProductEvent(ProductEventKind.TOOL_FINISHED, NOW, "s", "task", 2, "execute_command", "42 passed", ActivityStatus.SUCCEEDED))
+            service.publish(ProductEvent(ProductEventKind.TOOL_STARTED, NOW, "s", "task", 2, "execute_command", "pytest -q", ActivityStatus.RUNNING, source=ActivitySource.COMMAND_VERIFICATION, tool_name="execute_command"))
+            service.publish(ProductEvent(ProductEventKind.TOOL_FINISHED, NOW, "s", "task", 2, "execute_command", "42 passed", ActivityStatus.SUCCEEDED, source=ActivitySource.COMMAND_VERIFICATION, tool_name="execute_command"))
             service.publish(ProductEvent(ProductEventKind.SUBAGENT_STARTED, NOW, "s", "task", None, "inspect tests", status=ActivityStatus.RUNNING, metadata=(("role", "explore"), ("subagent_id", "subagent-1"))))
             service.publish(ProductEvent(ProductEventKind.SUBAGENT_FINISHED, NOW, "s", "task", None, "inspection complete", status=ActivityStatus.SUCCEEDED, metadata=(("role", "explore"), ("subagent_id", "subagent-1"))))
             await pilot.pause()
-            text = app.query_one("#conversation", ConversationPane).plain_text
+            text = app.query_one("#activity", ActivityPane).plain_text
             assert text.count("execute_command") == 1
             assert "succeeded" in text
             assert text.count("subagent-1") == 1
             assert "inspection complete" in text
+            assert "execute_command" not in app.query_one(
+                "#conversation", ConversationPane
+            ).plain_text
+
+    asyncio.run(scenario())
+
+
+def test_builtin_and_plugin_tools_have_distinct_visible_sources(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service = FakeProductService(tmp_path)
+        service._activities = (
+            ActivityView(
+                "a1", "tool", "read_file", "parser.py",
+                ActivityStatus.SUCCEEDED, 1, True,
+                ActivitySource.BUILTIN_TOOL, "read_file",
+            ),
+            ActivityView(
+                "a2", "tool", "git_diff", "--stat",
+                ActivityStatus.SUCCEEDED, 2, True,
+                ActivitySource.PLUGIN_TOOL, "git_diff", "git-readonly",
+            ),
+        )
+        app = CodingAgentApp(service)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            text = app.query_one("#activity", ActivityPane).plain_text
+            assert "[tool] read_file" in text
+            assert "[plugin:git-readonly] git_diff" in text
+
+    asyncio.run(scenario())
+
+
+def test_snapshot_replaces_live_tool_rows_without_duplicates(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service = FakeProductService(tmp_path)
+        app = CodingAgentApp(service)
+        async with app.run_test() as pilot:
+            service.publish(
+                ProductEvent(
+                    ProductEventKind.TOOL_STARTED, NOW, "s", "task", 1,
+                    "read_file", status=ActivityStatus.RUNNING,
+                    source=ActivitySource.BUILTIN_TOOL, tool_name="read_file",
+                )
+            )
+            service.publish(
+                ProductEvent(
+                    ProductEventKind.TOOL_FINISHED, NOW, "s", "task", 1,
+                    "read_file: ok", status=ActivityStatus.SUCCEEDED,
+                    source=ActivitySource.BUILTIN_TOOL, tool_name="read_file",
+                )
+            )
+            await pilot.pause()
+            service._activities = (
+                ActivityView(
+                    "read-1", "tool", "read_file", "parser.py\nsource",
+                    ActivityStatus.SUCCEEDED, 1, True,
+                    ActivitySource.BUILTIN_TOOL, "read_file",
+                ),
+            )
+            app._refresh_all(service.snapshot())
+            await pilot.pause()
+
+            assert app.query_one("#activity", ActivityPane).plain_text.count(
+                "[tool] read_file"
+            ) == 1
+
+    asyncio.run(scenario())
+
+
+def test_activity_autofollows_only_while_user_is_at_the_bottom(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service = FakeProductService(tmp_path)
+        service._activities = tuple(
+            ActivityView(
+                f"a{index}", "tool", "read_file", f"file-{index}.py",
+                ActivityStatus.SUCCEEDED, index, True,
+                ActivitySource.BUILTIN_TOOL, "read_file",
+            )
+            for index in range(40)
+        )
+        app = CodingAgentApp(service)
+        async with app.run_test(size=(100, 24)) as pilot:
+            options = app.query_one("#activity-list", OptionList)
+            await pilot.pause()
+            assert options.is_vertical_scroll_end
+            options.focus()
+            await pilot.press("home")
+            await pilot.pause()
+            assert not options.is_vertical_scroll_end
+            position = options.scroll_y
+
+            service._activities += (
+                ActivityView(
+                    "new-1", "tool", "read_file", "new.py",
+                    ActivityStatus.SUCCEEDED, 41, True,
+                    ActivitySource.BUILTIN_TOOL, "read_file",
+                ),
+            )
+            app._refresh_all(service.snapshot())
+            await pilot.pause()
+            assert options.scroll_y == position
+
+            await pilot.press("end")
+            await pilot.pause()
+            assert options.is_vertical_scroll_end
+            service._activities += (
+                ActivityView(
+                    "new-2", "tool", "read_file", "newer.py",
+                    ActivityStatus.SUCCEEDED, 42, True,
+                    ActivitySource.BUILTIN_TOOL, "read_file",
+                ),
+            )
+            app._refresh_all(service.snapshot())
+            await pilot.pause()
+            assert options.is_vertical_scroll_end
 
     asyncio.run(scenario())
 

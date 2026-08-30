@@ -114,3 +114,7 @@ class AgentEvent:
     kind: str
     step: int
     message: str
+    tool_name: str | None = None
+    tool_source: str | None = None
+    activity_kind: str | None = None
+    tool_ok: bool | None = None

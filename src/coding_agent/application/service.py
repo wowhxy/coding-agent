@@ -36,6 +36,7 @@ from .changes import (
     verification_views,
 )
 from .events import (
+    ActivitySource,
     ActivityStatus,
     ProductEvent,
     ProductEventKind,
@@ -148,6 +149,7 @@ class CodingAgentService:
                 self.session_home, config.workspace, registry
             )
             self._plugin_manager.restore_enabled()
+            self._registry = registry
             self._runner = AgentRunner(
                 self._client,
                 registry,
@@ -343,6 +345,7 @@ class CodingAgentService:
             activity_views(
                 self._interactive.history.messages,
                 sensitive_values=(self.config.api_key,),
+                tool_observer=self._registry.historical_observation_for,
             ),
             self._changes,
             self._verifications,
@@ -771,6 +774,7 @@ class CodingAgentService:
                 redact_product_text(title, (self.config.api_key,)),
                 redact_product_text(detail, (self.config.api_key,)),
                 status,
+                source=_product_event_source(kind),
             )
         )
 
@@ -850,3 +854,11 @@ def _failure_presentation(result: RunResult) -> str:
         RunStatus.STALLED: "Agent Stalled",
     }.get(result.status, "Task Error")
     return f"{category}: {detail}"
+
+
+def _product_event_source(kind: ProductEventKind) -> ActivitySource:
+    if kind in {ProductEventKind.ERROR, ProductEventKind.TASK_FAILED}:
+        return ActivitySource.ERROR
+    if kind is ProductEventKind.VERIFICATION:
+        return ActivitySource.COMMAND_VERIFICATION
+    return ActivitySource.TASK
