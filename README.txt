@@ -1,23 +1,20 @@
-项目：终端 Coding Agent
+项目：Coding Agent
 Git 仓库：https://github.com/wowhxy/coding-agent
 
-运行：Python 3.11+；pip install -e ".[test]"
+架构图：
+![Coding Agent 总体架构](CODING_AGENT_ARCHITECTURE.svg)
+
+简介：
+这是一个使用 Python 3.11+ 自主实现的本地 CLI/TUI Coding Agent。项目不使用 Agent Framework；基于模型原生 Tool Calling，自行实现 History、Context、ToolRegistry、本地执行、Agent Loop和错误处理。六个本地工具支持目录查看、文本搜索、文件读写、精确替换和命令执行，均在 workspace 内运行。
+
+安装与运行：
+python -m pip install -e .
 coding-agent tui --provider deepseek
-python -m coding_agent --provider deepseek
-python -m coding_agent --provider deepseek "<任务>"
-coding-agent --provider deepseek "<任务>"
 
-TUI：Ctrl+Enter提交，Ctrl+C取消；coding-agent doctor。
+功能与体验：
+TUI 提供多 Session 管理、恢复、搜索和重命名，将对话与 Tool、Plugin、Subagent Activity 分区展示。支持 Skills、Plugins、Workspace Memory 管理和历史 Recall。
 
-交互：默认恢复当前 workspace 的最近 session；--new-session 新建；--resume-session <ID> 恢复。/exit 或输入阶段 Ctrl+C 正常退出；运行阶段 Ctrl+C 丢弃未完成当前轮次。无已提交轮次的新会话不留下 session 文件。命令：/recall <query> /memory。
-pointer/catalog/可重建FTS5；History在JSON。
-
-Context/Memory：渐进压缩、增量摘要；不再经确认后保存；automatic；workspace 隔离。Skill：SKILL.md；/skills /skill use。Plugin：/plugins /plugin enable /plugin disable；不是安全沙箱。
-
-Subagent：delegate_tasks 单进程只读；parent 是单写者。
-
-API Key：DEEPSEEK_API_KEY（--thinking-mode disabled）；OPENAI_API_KEY、--provider openai --model <模型>。密钥不入库。
-
-特色：自实现 Agent Loop、六工具、Provider 抽象和 TUI。FINAL_RESPONSE 和持久化成功都不证明任务语义正确。
-
-安全：execute_command 非 OS sandbox；本地 session JSON 是明文，含任务、源码和工具输出；不要粘贴秘密。详见 docs/tui-guide.md。
+核心特色：
+1. Context/Memory：canonical History 保存完整协议事实；Context 在统一预算内组合 Skills、Workspace Memory、Persistent Summary、Recall 和最近完整轮次。采用渐进压缩：依次执行 Tool Result 截断、陈旧读取清理、Activity 压缩、增量摘要和按优先级渐进淘汰。Summary 属于单个 Session；Workspace Memory 跨同 workspace Session 共享，经用户或工具证据验证，并支持 Secret 过滤、去重、冲突更新和相关性检索。
+2. Tool 并行：只并行连续且安全的只读调用；编辑、命令和控制工具构成串行屏障。结果按原 Tool Call 顺序反馈，兼顾速度与确定性。
+3. Subagent：Explore、Analysis、Review 可并行执行独立只读调查，Child拥有独立 Context 和 Loop；父 Agent 保持单写者，统一修改和验证，避免并发写冲突。

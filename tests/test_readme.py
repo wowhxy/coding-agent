@@ -14,44 +14,27 @@ def test_submission_readme_constraints() -> None:
     assert "http" in text
     assert "运行" in text
     assert "特色" in text
-    assert "API Key" in text
-    assert "OPENAI_API_KEY" in text
-    assert "DEEPSEEK_API_KEY" in text
-    assert "--thinking-mode disabled" in text
+    assert "CODING_AGENT_ARCHITECTURE.svg" in text
+    assert Path("CODING_AGENT_ARCHITECTURE.svg").is_file()
+    assert "python -m pip install -e ." in text
     assert "coding-agent tui --provider deepseek" in text
-    assert "coding-agent doctor" in text
-    assert 'python -m coding_agent --provider deepseek "<任务>"' in text
-    assert 'coding-agent --provider deepseek "<任务>"' in text
-    assert "python -m coding_agent --provider deepseek" in text.splitlines()
-    assert "/exit" in text
-    assert "Ctrl+C" in text
-    assert "/exit 或输入阶段 Ctrl+C 正常退出" in text
-    assert "运行阶段 Ctrl+C 丢弃未完成当前轮次" in text
-    assert "无已提交轮次的新会话不留下 session 文件" in text
-    assert "默认恢复当前 workspace 的最近 session" in text
-    assert "--new-session" in text
-    assert "--resume-session" in text
-    assert "本地 session JSON 是明文" in text
-    assert "任务、源码和工具输出" in text
-    assert "不要粘贴秘密" in text
-    assert "FINAL_RESPONSE 和持久化成功都不证明任务语义正确" in text
-    assert "SKILL.md" in text
-    assert "/skills" in text
-    assert "/skill use" in text
-    assert "automatic" in text
-    assert "/recall <query>" in text
+    assert "Agent Framework" in text
+    assert "六个本地工具" in text
+    assert "多 Session" in text
+    assert "Skills" in text
+    assert "Plugins" in text
     assert "渐进压缩" in text
     assert "增量摘要" in text
-    assert "经确认后" in text
-    assert "workspace 隔离" in text
-    assert "/plugins" in text
-    assert "/plugin enable" in text
-    assert "/plugin disable" in text
-    assert "不是安全沙箱" in text
+    assert "Workspace Memory" in text
+    assert "Recall" in text
+    assert "Tool 并行" in text
+    assert "只读" in text
+    assert "串行屏障" in text
     assert "Subagent" in text
-    assert "delegate_tasks" in text
-    assert "单进程" in text
     assert "单写者" in text
+    assert "API Key" not in text
+    assert "coding-agent doctor" not in text
+    assert "demo/" not in text.casefold()
     lines = text.splitlines()
     assert lines[1].startswith("Git 仓库：")
     repository_url = lines[1].removeprefix("Git 仓库：")

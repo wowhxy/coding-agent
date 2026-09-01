@@ -5,6 +5,7 @@ __pycache__/
 
 # Test, coverage, and tool caches
 .pytest_cache/
+pytest-user-*/
 .coverage
 .coverage.*
 htmlcov/
@@ -29,8 +30,14 @@ env/
 # Local development orchestration artifacts
 .superpowers/
 
-# Assignment brief retained locally, not submitted in the repository
-/推免考核题目学生版.pdf
+# Local-only assignment, demo, interview, and development records
+/*.pdf
+/demo/
+/introduction/
+/docs/superpowers/
+/docs/final-hardening-report.md
+/benchmark_results/
+/test_a_fixture_staging/
 
 # Common editor and OS artifacts
 .DS_Store
